@@ -1,0 +1,4 @@
+# S360 Control: доступ текущему пользователю (uaccess) к LCD и кулеру MSI MEG CoreLiquid S360.
+# Только эти два устройства; общие права на USB не расширяются.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0db0", ATTR{idProduct}=="9ba6", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0db0", ATTRS{idProduct}=="6a05", TAG+="uaccess"

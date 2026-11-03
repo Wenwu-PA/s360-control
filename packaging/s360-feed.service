@@ -1,0 +1,13 @@
+[Unit]
+Description=S360 cooler: CPU temperature feed (EXPERIMENTAL)
+
+[Service]
+Type=simple
+Environment=MODE=balance
+EnvironmentFile=-%h/.config/s360-control/cooling.env
+ExecStart=%h/.local/bin/s360-lcd cooling feed --mode ${MODE}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
