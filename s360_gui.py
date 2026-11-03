@@ -16,9 +16,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-                               QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
+                               QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
-                               QStackedWidget, QVBoxLayout, QWidget)
+                               QTabWidget, QVBoxLayout, QWidget)
 
 import s360_lcd as core
 
@@ -28,21 +28,26 @@ OK, BAD, WARN = "#4ade80", "#f87171", "#fbbf24"
 STYLE = """
 * { font-size: 14px; }
 QMainWindow, QWidget { background: #14161a; color: #e6e8eb; }
-QListWidget { background: #1a1d23; border: none; border-radius: 12px; padding: 8px; outline: 0; }
-QListWidget::item { padding: 10px 14px; border-radius: 8px; margin: 2px 0; }
-QListWidget::item:selected { background: #2b2f3a; color: #ffffff; }
+QTabWidget::pane { border: none; border-top: 1px solid #30343b; }
+QTabBar::tab { background: transparent; color: #8b93a3; padding: 12px 18px; border-bottom: 2px solid transparent; }
+QTabBar::tab:selected { color: #ffffff; border-bottom: 2px solid #e54855; }
+QTabBar::tab:hover { color: #ffffff; background: #20242c; }
+QLabel#brand { color: #e54855; font-weight: bold; }
+QLabel#product { font-size: 20px; font-weight: bold; }
+QWidget#footer { border-top: 1px solid #30343b; }
+QWidget#footer QLabel { color: #8b93a3; font-size: 12px; border: none; }
 QGroupBox { background: #1a1d23; border: 1px solid #262a33; border-radius: 12px; margin-top: 18px; padding: 14px; }
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #9aa3b2; }
 QPushButton { background: #2b2f3a; border: none; border-radius: 8px; padding: 8px 16px; }
 QPushButton:hover { background: #363b48; }
-QPushButton:checked { background: #5b44d6; }
+QPushButton:checked { background: #e54855; }
 QPushButton:disabled, QComboBox:disabled, QSlider:disabled, QCheckBox:disabled { color: #5b6270; }
-QPushButton#primary { background: #5b44d6; }
-QPushButton#primary:hover { background: #6b55e6; }
+QPushButton#primary { background: #e54855; }
+QPushButton#primary:hover { background: #ef5b67; }
 QPushButton#primary:disabled { background: #2b2f3a; }
-QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit { background: #20242c; border: 1px solid #2d323d; border-radius: 8px; padding: 6px; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit { background: #20242c; border: 1px solid #2d323d; border-radius: 8px; padding: 6px; }
 QProgressBar { background: #20242c; border: none; border-radius: 6px; height: 12px; text-align: center; }
-QProgressBar::chunk { background: #5b44d6; border-radius: 6px; }
+QProgressBar::chunk { background: #e54855; border-radius: 6px; }
 QLabel#preview { background: #000000; border: 1px solid #2d323d; border-radius: 10px; }
 QLabel#warn { background: #2a2314; border: 1px solid #5c4a1a; border-radius: 10px; padding: 10px; color: #fbbf24; }
 QLabel#muted { color: #8b93a3; }
@@ -896,33 +901,62 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("S360 Control")
         self.resize(1040, 720)
         settings = core.load_settings()
-        self.pages = [("Dashboard", DashboardPage()), ("LCD Display", LcdPage(settings)),
-                      ("Cooling", CoolingPage(settings)), ("Monitoring", MonitoringPage()),
-                      ("Settings", SettingsPage(settings))]
-        side = QListWidget()
-        side.setFixedWidth(190)
-        self.stack = QStackedWidget()
+        overview = QTabWidget()
+        overview.addTab(DashboardPage(), "Состояние")
+        overview.addTab(MonitoringPage(), "Мониторинг")
+        overview.addTab(SettingsPage(settings), "Настройки")
+        overview.currentChanged.connect(self.tick)
+        self.pages = [("Обзор", overview), ("LCD-дисплей", LcdPage(settings)),
+                      ("Охлаждение", CoolingPage(settings))]
+        self.stack = QTabWidget()
         for name, page in self.pages:
-            side.addItem(name)
-            self.stack.addWidget(page)
-        side.currentRowChanged.connect(self.on_row)
-        side.setCurrentRow(1)
+            self.stack.addTab(page, name)
+        self.stack.setCurrentIndex(1)
         root = QWidget()
-        h = QHBoxLayout(root)
-        h.setContentsMargins(14, 14, 14, 14)
-        h.addWidget(side)
-        h.addWidget(self.stack, 1)
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(24, 20, 24, 12)
+        layout.setSpacing(16)
+        header = QHBoxLayout()
+        identity = QVBoxLayout()
+        brand = QLabel("MEG")
+        brand.setObjectName("brand")
+        product = QLabel("CORELIQUID S360")
+        product.setObjectName("product")
+        self.connection_status = QLabel()
+        identity.addWidget(brand)
+        identity.addWidget(product)
+        identity.addWidget(self.connection_status)
+        header.addLayout(identity)
+        header.addStretch()
+        header.addWidget(muted("LINUX / USB"))
+        layout.addLayout(header)
+        layout.addWidget(self.stack, 1)
+        footer = QWidget()
+        footer.setObjectName("footer")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 12, 0, 0)
+        footer_layout.addWidget(QLabel(f"S360 Control / {core.VERSION}"))
+        footer_layout.addStretch()
+        footer_layout.addWidget(QLabel("Настройки сохраняются локально"))
+        layout.addWidget(footer)
         self.setCentralWidget(root)
+        self.stack.currentChanged.connect(self.on_row)
+        self.tick()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(2000)
 
     def on_row(self, row):
-        self.stack.setCurrentIndex(row)
         self.tick()
 
     def tick(self):
+        connected = (core.usb_present(core.VID, core.PID)
+                     or core.usb_present(core.COOLER_VID, core.COOLER_PID))
+        self.connection_status.setText(badge("Устройство подключено", OK) if connected
+                                       else badge("Устройство не найдено", BAD))
         page = self.stack.currentWidget()
+        if isinstance(page, QTabWidget):
+            page = page.currentWidget()
         if hasattr(page, "refresh"):
             page.refresh()
 
