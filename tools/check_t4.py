@@ -54,6 +54,7 @@ def main():
         with (patch.object(gui, "systemctl", side_effect=service),
               patch.object(gui, "unit_installed", side_effect=lambda: installed),
               patch.object(gui.subprocess, "run", side_effect=forbidden),
+              patch.object(gui.CoolingPage, "journal_line", return_value="Ошибка из журнала"),
               patch.object(core, "do_send", side_effect=forbidden),
               patch.object(core, "find_hidraw", side_effect=forbidden),
               patch.object(core, "_write_reports", side_effect=forbidden),
@@ -74,22 +75,21 @@ def main():
 
             installed = True
             page.refresh()
-            assert page.btn_service.text() == "Запустить" and page.btn_service.isEnabled()
+            assert not page.btn_service.isEnabled()
             for mode in ("silent", "balance", "game"):
                 page.buttons[mode].click()
                 assert page.mode() == mode
                 assert sum(b.isChecked() for b in page.buttons.values()) == 1
-            # Отмена обоих подтверждений ничего не записывает и не запускает.
-            page.btn_service.click()
+            # Отмена применения ничего не записывает и не запускает.
             page.btn_apply.click()
-            assert question.call_count == 2 and not calls and not core.COOLING_ENV.exists()
+            assert question.call_count == 1 and not calls and not core.COOLING_ENV.exists()
             question.return_value = QMessageBox.StandardButton.Yes
             for mode in ("silent", "balance", "game"):
                 page.buttons[mode].click()
                 page.btn_apply.click()
                 assert calls[-1] == "restart" and core.COOLING_ENV.read_text() == f"MODE={mode}\n"
                 assert core.load_settings()["cooling_mode"] == mode
-                assert page.btn_service.text() == "Остановить"
+                assert page.btn_service.isEnabled()
                 assert "не подтверждён" in page.status.text()
             # Сохранённый выбор не выдаётся за прочитанный режим устройства.
             assert "нет данных" in page.last_mode.text()
@@ -102,9 +102,9 @@ def main():
             assert "нет данных" in page.last_mode.text()
 
             page.btn_service.click()
-            assert calls[-1] == "stop" and page.btn_service.text() == "Запустить"
-            page.btn_service.click()
-            assert calls[-1] == "start" and page.btn_service.text() == "Остановить"
+            assert calls[-1] == "stop" and not page.btn_service.isEnabled()
+            page.btn_apply.click()
+            assert calls[-1] == "restart" and page.btn_service.isEnabled()
             for expected in (True, False):
                 page.chk_auto.click()
                 assert enabled == expected and page.chk_auto.isChecked() == expected
@@ -113,7 +113,7 @@ def main():
             assert not page.chk_auto.isChecked() and warning.call_args.args[1] == "Ошибка"
             fail_command = "stop"
             page.btn_service.click()
-            assert page.btn_service.text() == "Остановить"
+            assert page.btn_service.isEnabled()
             assert warning.call_args.args[1] == "Сервис не остановлен"
             fail_command = "restart"
             page.btn_apply.click()
@@ -121,7 +121,7 @@ def main():
             fail_command = None
             state = "failed"
             page.refresh()
-            assert "Ошибка сервиса" in page.status.text() and page.btn_service.isEnabled()
+            assert "Ошибка сервиса" in page.status.text() and not page.btn_service.isEnabled()
             state = "Failed to connect to bus"
             page.refresh()
             assert "неизвестен" in page.status.text() and not page.btn_service.isEnabled()
