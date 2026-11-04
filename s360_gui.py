@@ -5,7 +5,7 @@
   Работает (проверено на железе): загрузка GIF/MP4 на LCD.
   Экспериментально (на этом устройстве не проверено): режимы кулера Silent/Balance/Game + передача температуры CPU.
   Поворот экрана: через публичный API ядра, 90°/270° экспериментальны.
-  Недоступно в GUI T1: яркость, вкл/выкл и режимы экрана, чтение RPM/температуры жидкости.
+  Недоступно в GUI: яркость, вкл/выкл и режимы экрана, чтение RPM/температуры жидкости.
 """
 import datetime
 import re
@@ -15,11 +15,11 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
-                               QTabWidget, QVBoxLayout, QWidget)
+                               QScrollArea, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 import s360_lcd as core
 
@@ -213,18 +213,61 @@ class LcdPage(QWidget):
         self.pending_file = None
         self.worker = None
         self.tmp = tempfile.TemporaryDirectory()
-        outer = QHBoxLayout(self)
+        page = QVBoxLayout(self)
+        page.addWidget(QLabel("Настройка экрана"))
+        modes = QHBoxLayout()
+        mode_group = QButtonGroup(self)
+        mode_group.setExclusive(True)
+        for title in ("Изображение / GIF", "Мониторинг", "Часы", "Баннер", "Погода"):
+            button = QPushButton(title)
+            button.setCheckable(True)
+            mode_group.addButton(button)
+            button.setChecked(title == "Изображение / GIF")
+            if title != "Изображение / GIF":
+                button.setEnabled(False)
+                button.setToolTip("Часы будут доступны в T7" if title == "Часы"
+                                  else "Этот режим экрана не поддерживается")
+            modes.addWidget(button)
+        page.addLayout(modes)
+        page.addWidget(muted("Другие режимы экрана пока не поддерживаются"))
 
-        left = QVBoxLayout()
+        # Прокрутка сохраняет доступ к параметрам при раскрытии и на небольших экранах.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        outer = QHBoxLayout(content)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(content)
+        page.addWidget(scroll, 1)
+
+        preview_box = QGroupBox("Предпросмотр")
+        preview_layout = QVBoxLayout(preview_box)
+        preview_layout.addStretch()
+        self.lbl_prev = QLabel("Предпросмотр")
+        self.lbl_prev.setObjectName("preview")
+        self.lbl_prev.setFixedSize(core.W + 4, core.H + 4)
+        self.lbl_prev.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_layout.addWidget(self.lbl_prev, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_orientation = muted("")
+        self.lbl_orientation.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.update_orientation()
+        preview_layout.addWidget(self.lbl_orientation)
+        preview_layout.addWidget(muted("Первый кадр после обработки. Поворот в подписи — локальная настройка; "
+                                       "результат проверь на LCD."))
+        preview_layout.addStretch()
+        outer.addWidget(preview_box, 2)
+
+        right = QVBoxLayout()
         self.panel = QWidget()
         pl = QVBoxLayout(self.panel)
         pl.setContentsMargins(0, 0, 0, 0)
-        box = QGroupBox("Картинка / GIF на экран")
+        box = QGroupBox("Медиафайл")
         form = QFormLayout(box)
-        self.btn_pick = QPushButton("Выбрать GIF или MP4…")
-        self.lbl_file = muted("файл не выбран")
+        self.btn_pick = QPushButton("Выбрать файл")
+        self.lbl_file = muted("Файл не выбран")
+        self.lbl_file.setTextFormat(Qt.TextFormat.PlainText)
         self.cmb_scale = QComboBox()
-        for title, key in (("Заполнить (с обрезкой)", "fill"), ("Вписать (чёрные полосы)", "fit"),
+        for title, key in (("Заполнить (с обрезкой)", "fill"), ("Вписать (полосы цвета фона)", "fit"),
                            ("Растянуть (искажает)", "stretch")):
             self.cmb_scale.addItem(title, key)
         self.cmb_scale.setCurrentIndex(max(0, self.cmb_scale.findData(self.s["scale"])))
@@ -237,9 +280,19 @@ class LcdPage(QWidget):
             self.cmb_rot.addItem(f"{deg}°", deg)
         self.cmb_rot.setCurrentIndex(max(0, self.cmb_rot.findData(int(self.s["rotate"]))))
         self.cmb_bg = QComboBox()
-        self.cmb_bg.setEditable(True)
-        self.cmb_bg.addItems(["black", "white", "gray"])
-        self.cmb_bg.setCurrentText(str(self.s["background"]))
+        for title, key in (("Чёрный", "black"), ("Белый", "white"), ("Свой цвет", "custom")):
+            self.cmb_bg.addItem(title, key)
+        background = str(self.s["background"])
+        self.custom_background = background if background not in ("black", "white") else "#808080"
+        self.cmb_bg.setCurrentIndex(max(0, self.cmb_bg.findData(
+            background if background in ("black", "white") else "custom")))
+        self.btn_bg = QPushButton("Выбрать цвет…")
+        self.bg_sample = QLabel()
+        self.bg_sample.setFixedSize(24, 24)
+        bg_row = QHBoxLayout()
+        bg_row.addWidget(self.cmb_bg, 1)
+        bg_row.addWidget(self.bg_sample)
+        bg_row.addWidget(self.btn_bg)
         self.spn_trim = QSpinBox()
         self.spn_trim.setRange(0, 3)
         self.spn_trim.setValue(int(self.s["edge_trim"]))
@@ -254,72 +307,66 @@ class LcdPage(QWidget):
         self.chk_select = QCheckBox("Выбор слота перед загрузкой (без него экран не менялся)")
         self.chk_select.setChecked(bool(self.s["with_select"]))
         self.chk_detach = QCheckBox("Разрешить временно отсоединить HID-драйвер от LCD (нужно для передачи)")
-        form.addRow(self.btn_pick)
-        form.addRow(self.lbl_file)
-        form.addRow("Масштаб", self.cmb_scale)
+        form.addRow(self.lbl_file, self.btn_pick)
+        form.addRow("Масштабирование", self.cmb_scale)
         form.addRow("Поворот картинки", self.cmb_rot)
-        form.addRow("Фон (прозрачность, полосы)", self.cmb_bg)
-        form.addRow("Подрезка края, px", self.spn_trim)
-        form.addRow("Обрезка: X", self.sld_x)
-        form.addRow("Обрезка: Y", self.sld_y)
-        form.addRow("FPS", self.edt_fps)
-        form.addRow("Длительность", self.spn_sec)
-        form.addRow(muted("Проверено на этом экране: 20/3, 10 и 15 fps, анимация до ~2,5 с (37 кадров). Больше — "
-                          "пробуй ступенями; при сбое восстановление — через MSI Center."))
-        form.addRow(self.chk_select)
-        form.addRow(self.chk_detach)
-        pl.addWidget(box)
-        self.btn_send = QPushButton("Отправить на LCD")
-        self.btn_send.setObjectName("primary")
-        pl.addWidget(self.btn_send)
-        left.addWidget(self.panel)
-        self.btn_cancel = QPushButton("Остановить")
-        self.btn_cancel.setEnabled(False)
-        self.prog = QProgressBar()
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumHeight(110)
-        left.addWidget(self.btn_cancel)
-        left.addWidget(self.prog)
-        left.addWidget(self.log)
+        form.addRow("Фон прозрачности", bg_row)
+        form.addRow("Кадрирование X", self.sld_x)
+        form.addRow("Кадрирование Y", self.sld_y)
 
-        dbox = QGroupBox("Поворот экрана (эксперимент)")
-        dl = QFormLayout(dbox)
+        self.btn_advanced = QToolButton()
+        self.btn_advanced.setText("Дополнительные параметры")
+        self.btn_advanced.setCheckable(True)
+        self.btn_advanced.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_advanced.setArrowType(Qt.ArrowType.RightArrow)
+        form.addRow(self.btn_advanced)
+        self.advanced = QWidget()
+        advanced_form = QFormLayout(self.advanced)
+        advanced_form.setContentsMargins(0, 0, 0, 0)
+        advanced_form.addRow("FPS", self.edt_fps)
+        advanced_form.addRow("Длительность, с", self.spn_sec)
+        advanced_form.addRow("Подрезка края, px", self.spn_trim)
+        advanced_form.addRow(muted("Проверено на этом экране: 20/3, 10 и 15 fps, анимация до ~2,5 с (37 кадров). Больше — "
+                                   "пробуй ступенями; при сбое восстановление — через MSI Center."))
+        advanced_form.addRow(self.chk_select)
+        advanced_form.addRow(self.chk_detach)
         self.cmb_dir = QComboBox()
         for deg in core.DIRECTIONS:
             self.cmb_dir.addItem(f"{deg}°", deg)
         self.cmb_dir.setCurrentIndex(max(0, self.cmb_dir.findData(int(self.s["device_direction"]))))
         self.btn_dir = QPushButton("Применить поворот экрана")
         self.pending_dir = None
-        dl.addRow("Направление", self.cmb_dir)
-        dl.addRow(self.btn_dir)
-        dl.addRow(muted("0°/180° подтверждены захватом; 90°/270° — только анализом DLL. Неизвестно, сохранится ли поворот после "
-                        "выключения. Для 90°/270° файлы грузятся в слот R1 — после смены перезагрузи картинку."))
-        left.addWidget(dbox)
+        advanced_form.addRow("Поворот экрана (эксперимент)", self.cmb_dir)
+        advanced_form.addRow(self.btn_dir)
+        advanced_form.addRow(muted("0°/180° подтверждены захватом; 90°/270° — только анализом DLL. Неизвестно, сохранится ли поворот после "
+                                   "выключения. Для 90°/270° файлы грузятся в слот R1 — после смены перезагрузи картинку."))
+        self.advanced.hide()
+        form.addRow(self.advanced)
+        self.btn_send = QPushButton("Загрузить на экран")
+        self.btn_send.setObjectName("primary")
+        form.addRow(self.btn_send)
+        pl.addWidget(box)
+        right.addWidget(self.panel)
+        self.btn_cancel = QPushButton("Остановить")
+        self.btn_cancel.setEnabled(False)
+        self.prog = QProgressBar()
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(110)
+        right.addWidget(self.btn_cancel)
+        right.addWidget(self.prog)
+        right.addWidget(self.log)
 
-        na = QGroupBox("Недоступно в GUI T1")
+        na = QGroupBox("Недоступно в GUI")
         nl = QFormLayout(na)
-        for label, widget in (("Включение/выключение", QCheckBox("Экран включён")), ("Яркость", QSlider(Qt.Orientation.Horizontal)),
-                              ("Режимы экрана", QComboBox())):
+        for label, widget in (("Включение/выключение", QCheckBox("Экран включён")),
+                              ("Яркость", QSlider(Qt.Orientation.Horizontal))):
             widget.setEnabled(False)
             nl.addRow(label, widget)
-        nl.addRow(muted("Яркость, включение/выключение и часы поддерживаются ядром 0.7, но ещё не подключены в GUI T1. "
-                        "Мониторинг на LCD недоступен: нет подтверждённого протокола. "
-                        "Поворот самой картинки (выше) делается программно и работает без этого."))
-        left.addWidget(na)
-        left.addStretch()
-        outer.addLayout(left, 3)
-
-        right = QVBoxLayout()
-        self.lbl_prev = QLabel("предпросмотр")
-        self.lbl_prev.setObjectName("preview")
-        self.lbl_prev.setFixedSize(core.W + 4, core.H + 4)
-        self.lbl_prev.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right.addWidget(self.lbl_prev)
-        right.addWidget(muted("Первый кадр после масштабирования, 240×320 (как в эталонном файле). Реальная ориентация "
-                              "на экране не проверялась."))
+        nl.addRow(muted("Яркость и включение/выключение будут доступны в T6; часы — в T7."))
+        right.addWidget(na)
         right.addStretch()
-        outer.addLayout(right, 1)
+        outer.addLayout(right, 3)
 
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -330,7 +377,9 @@ class LcdPage(QWidget):
         self.btn_dir.clicked.connect(self.apply_direction)
         for w in (self.cmb_scale, self.cmb_rot):
             w.currentIndexChanged.connect(self.changed)
-        self.cmb_bg.currentTextChanged.connect(self.changed)
+        self.cmb_bg.currentIndexChanged.connect(self.changed)
+        self.btn_bg.clicked.connect(self.pick_background)
+        self.btn_advanced.toggled.connect(self.toggle_advanced)
         for w in (self.sld_x, self.sld_y):
             w.valueChanged.connect(self.changed)
         self.edt_fps.textChanged.connect(self.changed)
@@ -338,6 +387,23 @@ class LcdPage(QWidget):
         self.spn_trim.valueChanged.connect(self.changed)
         self.chk_select.toggled.connect(self.changed)
         self.changed()
+
+    def toggle_advanced(self, expanded):
+        self.advanced.setVisible(expanded)
+        self.btn_advanced.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    def background_value(self):
+        return self.custom_background if self.cmb_bg.currentData() == "custom" else self.cmb_bg.currentData()
+
+    def pick_background(self):
+        color = QColorDialog.getColor(QColor(self.background_value()), self, "Фон прозрачности")
+        if color.isValid():
+            self.custom_background = color.name()
+            self.cmb_bg.setCurrentIndex(self.cmb_bg.findData("custom"))
+            self.changed()
+
+    def update_orientation(self):
+        self.lbl_orientation.setText(f"240 × 320 px · поворот {self.s['device_direction']}°")
 
     # --- настройки
     def fps_value(self):
@@ -352,10 +418,14 @@ class LcdPage(QWidget):
         core.ENC.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
                         scale=self.cmb_scale.currentData(), focus_x=self.sld_x.value() / 100.0,
                         focus_y=self.sld_y.value() / 100.0, rotate=int(self.cmb_rot.currentData()),
-                        background=self.cmb_bg.currentText().strip() or "black",
+                        background=self.background_value(),
                         edge_trim=self.spn_trim.value())
 
     def changed(self, *_):
+        self.btn_bg.setEnabled(self.cmb_bg.currentData() == "custom")
+        color = QColor(self.background_value())
+        self.bg_sample.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #8b93a3; border-radius: 4px;")
+        self.bg_sample.setToolTip(self.background_value())
         fill = self.cmb_scale.currentData() == "fill"
         self.sld_x.setEnabled(fill)
         self.sld_y.setEnabled(fill)
@@ -364,7 +434,7 @@ class LcdPage(QWidget):
                           scale=self.cmb_scale.currentData(), focus_x=self.sld_x.value() / 100.0,
                           focus_y=self.sld_y.value() / 100.0, with_select=self.chk_select.isChecked(),
                           rotate=int(self.cmb_rot.currentData()),
-                          background=self.cmb_bg.currentText().strip() or "black",
+                          background=self.background_value(),
                           edge_trim=self.spn_trim.value())
             core.save_settings(self.s)
         except (core.S360Error, OSError):
@@ -376,7 +446,8 @@ class LcdPage(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "Выбор файла", str(Path.home()), "GIF/MP4 (*.gif *.mp4)")
         if path:
             self.src = path
-            self.lbl_file.setText(path)
+            self.lbl_file.setText(Path(path).name)
+            self.lbl_file.setToolTip(path)
             self.update_preview()
 
     def update_preview(self):
@@ -492,6 +563,7 @@ class LcdPage(QWidget):
         self.finish_ui()
         if self.pending_dir is not None:
             self.s["device_direction"] = self.pending_dir
+            self.update_orientation()
             self.pending_dir = None
         elif self.pending_file is not None:
             self.s["last_file"] = self.pending_file
