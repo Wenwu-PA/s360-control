@@ -243,7 +243,7 @@ def _run_ffmpeg(cmd, timeout):
 
 
 def convert_gif(src: Path, dst: Path, fps=None):
-    """GIF -> H.264 240x320 (параметры как у эталона: baseline, level 3.0, yuvj420p), без faststart."""
+    """GIF/MP4 -> H.264 240x320 (параметры как у эталона: baseline, level 3.0, yuvj420p), без faststart."""
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-n", "-i", str(src), "-an",
            "-vf", build_vf(fps), "-c:v", "libx264", "-pix_fmt", ENC["pix_fmt"]]
     if ENC["profile"]:
@@ -290,13 +290,11 @@ def beyond_tested(duration, rate) -> bool:
 
 
 def load_media(path: Path, fps=None) -> bytes:
-    if path.suffix.lower() == ".gif":
+    if path.suffix.lower() in (".gif", ".mp4"):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "out.mp4"
             convert_gif(path, out, fps)
             data = out.read_bytes()
-    elif path.suffix.lower() == ".mp4":
-        data = path.read_bytes()
     else:
         raise S360Error("Поддерживаются только .gif и .mp4 (статичные PNG/JPG не подтверждены протоколом)")
     try:
