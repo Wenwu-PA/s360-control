@@ -6,6 +6,7 @@
   Экспериментально (на этом устройстве не проверено): режимы кулера Silent/Balance/Game + передача температуры CPU.
   Поворот экрана: через публичный API ядра, 90°/270° экспериментальны.
   Яркость и вкл/выкл: через API ядра, с подтверждением записи во флеш.
+  Часы: подтверждённый стиль 1, местное время перед отправкой, без автосинхронизации.
   Недоступно в GUI: другие режимы экрана, чтение RPM/температуры жидкости.
 """
 import datetime
@@ -84,6 +85,7 @@ def muted(text):
 
 class SendWorker(QThread):
     progress = Signal(int, int)
+    clock_time = Signal(str)
     done_ok = Signal()
     failed = Signal(str, bool)
 
@@ -97,6 +99,11 @@ class SendWorker(QThread):
 
     def run(self):
         try:
+            if self.kind == "clock":
+                now = datetime.datetime.now().astimezone()
+                self.plan = core.build_clock_plan(1, now=now.timestamp(),
+                                                  tz_offset=int(now.utcoffset().total_seconds()))
+                self.clock_time.emit(now.strftime("%d.%m.%Y %H:%M:%S %z"))
             core.do_send(self.plan, self.detach_ok, self.sha,
                          progress=lambda i, n: self.progress.emit(i, n), cancel=lambda: self._cancel, kind=self.kind)
         except core.S360Error as e:
@@ -194,7 +201,7 @@ class DashboardPage(QWidget):
             when = datetime.datetime.fromtimestamp(st.get("time", 0)).strftime("%d.%m %H:%M:%S")
             kind = st.get("kind", "upload")
             tag = (st.get("sha256") or "") if kind == "direction" else (st.get("sha256") or "")[:8]
-            what = "поворот экрана" if kind == "direction" else "загрузка"
+            what = {"direction": "поворот экрана", "clock": "часы", "brightness": "яркость"}.get(kind, "загрузка")
             self.last_lcd.setText(f"{what}: {names.get(st['status'], st['status'])} — {when}" + (f", {tag}" if tag else ""))
         else:
             self.last_lcd.setText("нет данных")
@@ -216,6 +223,7 @@ class LcdPage(QWidget):
         self.src = None
         self.pending_file = None
         self.pending_brightness = None
+        self.pending_clock = None
         self.worker = None
         self.tmp = tempfile.TemporaryDirectory()
         page = QVBoxLayout(self)
@@ -223,18 +231,21 @@ class LcdPage(QWidget):
         modes = QHBoxLayout()
         mode_group = QButtonGroup(self)
         mode_group.setExclusive(True)
-        for title in ("Изображение / GIF", "Мониторинг", "Часы"):
+        self.mode_buttons = {}
+        for title, mode in (("Изображение / GIF", "media"), ("Мониторинг", "monitor"), ("Часы", "clock")):
             button = QPushButton(title)
+            self.mode_buttons[mode] = button
             button.setCheckable(True)
             mode_group.addButton(button)
-            button.setChecked(title == "Изображение / GIF")
-            if title != "Изображение / GIF":
+            button.setChecked(mode == self.s["lcd_mode"])
+            if mode == "monitor":
                 button.setEnabled(False)
-                button.setToolTip("Часы будут доступны в T7" if title == "Часы"
-                                  else "Этот режим экрана не поддерживается")
+                button.setToolTip("Этот режим экрана не поддерживается")
+            else:
+                button.clicked.connect(lambda checked=False, mode=mode: self.select_mode(mode))
             modes.addWidget(button)
         page.addLayout(modes)
-        page.addWidget(muted("Другие режимы экрана пока не поддерживаются"))
+        page.addWidget(muted("Мониторинг пока не поддерживается"))
 
         # Прокрутка сохраняет доступ к параметрам при раскрытии и на небольших экранах.
         scroll = QScrollArea()
@@ -246,6 +257,7 @@ class LcdPage(QWidget):
         page.addWidget(scroll, 1)
 
         preview_box = QGroupBox("Предпросмотр")
+        self.preview_box = preview_box
         preview_layout = QVBoxLayout(preview_box)
         preview_layout.addStretch()
         self.lbl_prev = QLabel("Предпросмотр")
@@ -354,6 +366,25 @@ class LcdPage(QWidget):
         form.addRow(self.btn_send)
         pl.addWidget(box)
         right.addWidget(self.panel)
+        self.clock_panel = QGroupBox("Часы · стиль №1")
+        clock_form = QFormLayout(self.clock_panel)
+        clock_form.addRow(muted("Локально выбран режим «Часы». Стиль №1 подтверждён захватом MSI Center."))
+        self.lbl_clock_time = muted("")
+        self.lbl_clock_status = muted("Часы из этого сеанса ещё не отправлялись. Состояние LCD не считано.")
+        self.chk_clock_detach = QCheckBox(self.chk_detach.text())
+        self.chk_clock_detach.toggled.connect(self.chk_detach.setChecked)
+        self.chk_detach.toggled.connect(self.chk_clock_detach.setChecked)
+        self.btn_clock = QPushButton("Включить часы")
+        self.btn_clock.setObjectName("primary")
+        self.btn_clock.clicked.connect(self.apply_clock)
+        clock_form.addRow(self.lbl_clock_time)
+        clock_form.addRow(muted("Перед отправкой время будет обновлено из системы. Автосинхронизации нет. "
+                               "Выбор режима здесь сохраняется локально и сам по себе не меняет LCD. "
+                               "Возврат к медиа — через загрузку файла с выбором слота."))
+        clock_form.addRow(self.chk_clock_detach)
+        clock_form.addRow(self.btn_clock)
+        clock_form.addRow(self.lbl_clock_status)
+        right.addWidget(self.clock_panel)
         self.btn_cancel = QPushButton("Остановить")
         self.btn_cancel.setEnabled(False)
         self.prog = QProgressBar()
@@ -409,6 +440,52 @@ class LcdPage(QWidget):
         self.spn_trim.valueChanged.connect(self.changed)
         self.chk_select.toggled.connect(self.changed)
         self.changed()
+        self.show_mode()
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self.update_clock_time)
+        self.clock_timer.start(1000)  # Только подпись GUI; команд устройству не отправляет.
+        self.update_clock_time()
+
+    def show_mode(self):
+        clock = self.s["lcd_mode"] == "clock"
+        self.clock_panel.setVisible(clock)
+        self.panel.setVisible(not clock)
+        self.preview_box.setVisible(not clock)
+
+    def select_mode(self, mode):
+        if self.worker is not None:
+            return
+        self.s["lcd_mode"] = mode
+        self.show_mode()
+        try:
+            core.save_settings(self.s)
+        except OSError as e:
+            QMessageBox.warning(self, "Настройки не сохранены", str(e))
+
+    def update_clock_time(self):
+        if self.pending_clock is None:
+            self.lbl_clock_time.setText("Местное время для LCD: " +
+                                        datetime.datetime.now().astimezone().strftime("%d.%m.%Y %H:%M:%S %z"))
+
+    def clock_time_ready(self, text):
+        self.pending_clock = text
+        self.lbl_clock_time.setText("Время отправки: " + text)
+        self.lbl_clock_status.setText("Отправка хостом: стиль №1, " + text + "…")
+
+    def apply_clock(self):
+        if self.worker is not None or self.s["lcd_mode"] != "clock":
+            return
+        if not self.confirm_previous():
+            return
+        answer = QMessageBox.question(
+            self, "Часы на LCD", "Отправить местное время системы и включить часы, стиль №1?\n"
+            "Время будет получено непосредственно перед отправкой. Подтверждения от LCD нет.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.pending_clock = ""
+        self.lbl_clock_status.setText("Подготовка отправки часов…")
+        self.start_worker([], "clock:1", "clock")
 
     def update_brightness_label(self):
         self.lbl_brightness.setText(
@@ -542,12 +619,16 @@ class LcdPage(QWidget):
         self.pending_file = Path(self.src).name if kind == "upload" else None
         self.panel.setEnabled(False)
         self.brightness_panel.setEnabled(False)
+        self.clock_panel.setEnabled(False)
+        for button in self.mode_buttons.values():
+            button.setEnabled(False)
         self.btn_dir.setEnabled(False)
         self.cmb_dir.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.prog.setValue(0)
-        self.log.appendPlainText(f"отправка ({kind}): {len(plan)} пакетов, {sha[:16]}")
+        self.log.appendPlainText(f"отправка ({kind}): {2 if kind == 'clock' else len(plan)} пакетов, {sha[:16]}")
         self.worker = SendWorker(plan, self.chk_detach.isChecked(), sha, kind)
+        self.worker.clock_time.connect(self.clock_time_ready)
         self.worker.progress.connect(self.on_progress)
         self.worker.done_ok.connect(self.on_done)
         self.worker.failed.connect(self.on_failed)
@@ -621,6 +702,9 @@ class LcdPage(QWidget):
         self.worker = None
         self.panel.setEnabled(True)
         self.brightness_panel.setEnabled(True)
+        self.clock_panel.setEnabled(True)
+        for mode, button in self.mode_buttons.items():
+            button.setEnabled(mode != "monitor")
         self.btn_dir.setEnabled(True)
         self.cmb_dir.setEnabled(True)
         self.btn_cancel.setEnabled(False)
@@ -628,6 +712,10 @@ class LcdPage(QWidget):
 
     def on_done(self):
         self.finish_ui()
+        if self.pending_clock is not None:
+            self.lbl_clock_status.setText(
+                f"Хост отправил: часы, стиль №1, {self.pending_clock}. Приём LCD не подтверждён.")
+            self.pending_clock = None
         if self.pending_brightness is not None:
             self.lbl_brightness_status.setText(
                 f"Хост отправил: {self.pending_brightness}%. Приём LCD не подтверждён.")
@@ -649,6 +737,9 @@ class LcdPage(QWidget):
                                 "что на нём отображается.")
 
     def on_failed(self, msg, uncertain):
+        if self.pending_clock is not None:
+            self.lbl_clock_status.setText("Ошибка отправки часов; состояние LCD неизвестно. " + msg)
+            self.pending_clock = None
         if self.pending_brightness is not None:
             self.lbl_brightness_status.setText(
                 "Ошибка отправки яркости; состояние LCD неизвестно. Выбор остаётся локальным. " + msg)

@@ -144,8 +144,8 @@ def main():
         modes = {b.text(): b for b in lcd.findChildren(QPushButton)}
         modes["Изображение / GIF"].click()
         assert modes["Изображение / GIF"].isChecked()
-        for title in ("Мониторинг", "Часы"):
-            assert not modes[title].isEnabled()
+        assert not modes["Мониторинг"].isEnabled()
+        assert modes["Часы"].isEnabled()
         assert "Баннер" not in modes and "Погода" not in modes
         for scale in ("fit", "stretch", "fill"):
             lcd.cmb_scale.setCurrentIndex(lcd.cmb_scale.findData(scale))
