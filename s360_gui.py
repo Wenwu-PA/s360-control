@@ -5,7 +5,8 @@
   Работает (проверено на железе): загрузка GIF/MP4 на LCD.
   Экспериментально (на этом устройстве не проверено): режимы кулера Silent/Balance/Game + передача температуры CPU.
   Поворот экрана: через публичный API ядра, 90°/270° экспериментальны.
-  Недоступно в GUI: яркость, вкл/выкл и режимы экрана, чтение RPM/температуры жидкости.
+  Яркость и вкл/выкл: через API ядра, с подтверждением записи во флеш.
+  Недоступно в GUI: другие режимы экрана, чтение RPM/температуры жидкости.
 """
 import datetime
 import re
@@ -214,6 +215,7 @@ class LcdPage(QWidget):
         self.s = settings
         self.src = None
         self.pending_file = None
+        self.pending_brightness = None
         self.worker = None
         self.tmp = tempfile.TemporaryDirectory()
         page = QVBoxLayout(self)
@@ -362,14 +364,29 @@ class LcdPage(QWidget):
         right.addWidget(self.prog)
         right.addWidget(self.log)
 
-        na = QGroupBox("Недоступно в GUI")
-        nl = QFormLayout(na)
-        for label, widget in (("Включение/выключение", QCheckBox("Экран включён")),
-                              ("Яркость", QSlider(Qt.Orientation.Horizontal))):
-            widget.setEnabled(False)
-            nl.addRow(label, widget)
-        nl.addRow(muted("Яркость и включение/выключение будут доступны в T6; часы — в T7."))
-        right.addWidget(na)
+        self.brightness_panel = QGroupBox("Яркость и питание LCD")
+        bl = QFormLayout(self.brightness_panel)
+        self.chk_lcd = QCheckBox("Включить LCD (локальный выбор)")
+        self.chk_lcd.setChecked(bool(self.s["lcd_enabled"]))
+        self.sld_brightness = QSlider(Qt.Orientation.Horizontal)
+        self.sld_brightness.setRange(0, 100)
+        self.sld_brightness.setValue(int(self.s["brightness"]) if self.chk_lcd.isChecked() else 0)
+        self.lbl_brightness = muted("")
+        self.lbl_brightness_status = muted("Состояние LCD не считано. Подтверждения от устройства нет.")
+        self.btn_brightness = QPushButton("Применить яркость / питание")
+        bl.addRow(self.chk_lcd)
+        bl.addRow("Яркость", self.sld_brightness)
+        bl.addRow(self.lbl_brightness)
+        bl.addRow(muted("Запись во флеш экрана, не двигай ползунок непрерывно. "
+                        "Отправка только по кнопке «Применить» с подтверждением. "
+                        "0% = выключение; включение восстанавливает последнюю ненулевую яркость."))
+        bl.addRow(self.btn_brightness)
+        bl.addRow(self.lbl_brightness_status)
+        self.update_brightness_label()
+        self.sld_brightness.valueChanged.connect(self.brightness_changed)
+        self.chk_lcd.toggled.connect(self.lcd_toggled)
+        self.btn_brightness.clicked.connect(self.apply_brightness)
+        right.addWidget(self.brightness_panel)
         right.addStretch()
         outer.addLayout(right, 3)
 
@@ -392,6 +409,45 @@ class LcdPage(QWidget):
         self.spn_trim.valueChanged.connect(self.changed)
         self.chk_select.toggled.connect(self.changed)
         self.changed()
+
+    def update_brightness_label(self):
+        self.lbl_brightness.setText(
+            f"Локально выбрано: {self.sld_brightness.value()}% · "
+            f"последняя ненулевая: {self.s['brightness']}%. Не считано из LCD.")
+
+    def brightness_changed(self, value):
+        if value > 0:
+            self.s["brightness"] = value
+        self.s["lcd_enabled"] = value > 0
+        self.chk_lcd.blockSignals(True)
+        self.chk_lcd.setChecked(value > 0)
+        self.chk_lcd.blockSignals(False)
+        self.update_brightness_label()
+        try:
+            core.save_settings(self.s)
+        except OSError as e:
+            self.lbl_brightness_status.setText(f"Локальные настройки не сохранены: {e}")
+
+    def lcd_toggled(self, enabled):
+        self.sld_brightness.setValue(int(self.s["brightness"]) if enabled else 0)
+
+    def apply_brightness(self):
+        if self.worker is not None:
+            return
+        value = self.sld_brightness.value()
+        if not self.confirm_previous():
+            return
+        answer = QMessageBox.question(
+            self, "Яркость и питание LCD",
+            f"Отправить яркость {value}%" + (" (выключение LCD)" if value == 0 else "") +
+            "?\nЗапись во флеш экрана, не двигай ползунок непрерывно.\n"
+            "Подтверждения приёма от LCD нет.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.pending_brightness = value
+        self.lbl_brightness_status.setText(f"Отправка хостом: {value}%…")
+        self.start_worker(core.build_brightness_plan(value), f"brightness:{value}", "brightness")
 
     def toggle_advanced(self, expanded):
         self.advanced.setVisible(expanded)
@@ -485,6 +541,7 @@ class LcdPage(QWidget):
     def start_worker(self, plan, sha, kind):
         self.pending_file = Path(self.src).name if kind == "upload" else None
         self.panel.setEnabled(False)
+        self.brightness_panel.setEnabled(False)
         self.btn_dir.setEnabled(False)
         self.cmb_dir.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -563,6 +620,7 @@ class LcdPage(QWidget):
         self.worker.wait()
         self.worker = None
         self.panel.setEnabled(True)
+        self.brightness_panel.setEnabled(True)
         self.btn_dir.setEnabled(True)
         self.cmb_dir.setEnabled(True)
         self.btn_cancel.setEnabled(False)
@@ -570,6 +628,10 @@ class LcdPage(QWidget):
 
     def on_done(self):
         self.finish_ui()
+        if self.pending_brightness is not None:
+            self.lbl_brightness_status.setText(
+                f"Хост отправил: {self.pending_brightness}%. Приём LCD не подтверждён.")
+            self.pending_brightness = None
         if self.pending_dir is not None:
             self.s["device_direction"] = self.pending_dir
             self.update_orientation()
@@ -587,6 +649,10 @@ class LcdPage(QWidget):
                                 "что на нём отображается.")
 
     def on_failed(self, msg, uncertain):
+        if self.pending_brightness is not None:
+            self.lbl_brightness_status.setText(
+                "Ошибка отправки яркости; состояние LCD неизвестно. Выбор остаётся локальным. " + msg)
+            self.pending_brightness = None
         self.pending_dir = None
         self.pending_file = None
         self.finish_ui()
