@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDial
 import s360_lcd as core
 
 UNIT = "s360-feed.service"
+COOLING_TITLES = {"silent": "Тихий", "balance": "Сбалансированный", "game": "Игровой"}
 OK, BAD, WARN = "#4ade80", "#f87171", "#fbbf24"
 
 STYLE = """
@@ -42,6 +43,8 @@ QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color:
 QPushButton { background: #2b2f3a; border: none; border-radius: 8px; padding: 8px 16px; }
 QPushButton:hover { background: #363b48; }
 QPushButton:checked { background: #e54855; }
+QPushButton[coolingCard="true"] { text-align: left; padding: 20px; border: 1px solid #30343b; background: #20242c; }
+QPushButton[coolingCard="true"]:checked { border: 1px solid #e54855; background: #2b2f3a; }
 QPushButton:disabled, QComboBox:disabled, QSlider:disabled, QCheckBox:disabled { color: #5b6270; }
 QPushButton#primary { background: #e54855; }
 QPushButton#primary:hover { background: #ef5b67; }
@@ -591,47 +594,62 @@ class CoolingPage(QWidget):
         super().__init__()
         self.s = settings
         lay = QVBoxLayout(self)
-        warn = QLabel("ЭКСПЕРИМЕНТАЛЬНО. Протокол взят из стороннего драйвера (sarzeaud/coreliquid_driver) и совпадает по форме "
-                      "с отчётами d0 40/41/85 в захвате, но на ЭТОМ устройстве не проверен. Режим работает только вместе с "
+        lay.addWidget(QLabel("Управление охлаждением"))
+        warn = QLabel("Экспериментальная функция. Формат команд сверен с захватами MSI Center этого устройства; "
+                      "работа охлаждения из Linux ещё не проверена. Режим работает вместе с "
                       "передачей температуры CPU (сервис). Если сервис остановить, поведение помпы и вентиляторов без неё "
                       "не проверено — следи за температурой.")
         warn.setObjectName("warn")
         warn.setWordWrap(True)
         lay.addWidget(warn)
-        box = QGroupBox("Режим охлаждения")
-        bl = QVBoxLayout(box)
         row = QHBoxLayout()
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons = {}
-        for key, label in core.COOLING_LABELS.items():
-            b = QPushButton(label)
+        for key, description in (("silent", "Минимум шума"), ("balance", "Повседневная работа"),
+                                 ("game", "Приоритет охлаждения")):
+            b = QPushButton(f"{COOLING_TITLES[key]}\n\n{description}")
+            b.setProperty("coolingCard", True)
             b.setCheckable(True)
             self.group.addButton(b)
             self.buttons[key] = b
-            row.addWidget(b)
+            row.addWidget(b, 1)
         self.buttons.get(self.s["cooling_mode"], self.buttons["balance"]).setChecked(True)
-        for label, why in (("Customize", "свои кривые: не реализовано"), ("GI Mode", "не включено (нет проверки)")):
-            b = QPushButton(label)
-            b.setEnabled(False)
-            b.setToolTip(why)
-            row.addWidget(b)
-        bl.addLayout(row)
-        self.btn_apply = QPushButton("Применить и запустить передачу температуры")
-        self.btn_apply.setObjectName("primary")
-        self.btn_stop = QPushButton("Остановить сервис")
-        self.chk_auto = QCheckBox("Запускать сервис при входе в систему")
-        for w in (self.btn_apply, self.btn_stop, self.chk_auto):
-            bl.addWidget(w)
+        lay.addLayout(row)
+
+        box = QGroupBox("Передача температуры CPU")
+        bl = QVBoxLayout(box)
+        bl.addWidget(muted(f"Нужна для работы режима · обновление каждые {core.FEED_INTERVAL_S:g} с"))
+        service_row = QHBoxLayout()
         self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.RichText)
-        bl.addWidget(self.status)
+        self.status.setWordWrap(True)
+        service_row.addWidget(self.status, 1)
+        self.btn_service = QPushButton("Запустить")
+        service_row.addWidget(self.btn_service)
+        bl.addLayout(service_row)
+        self.chk_auto = QCheckBox("Запускать сервис при входе в систему")
+        bl.addWidget(self.chk_auto)
         lay.addWidget(box)
-        lay.addWidget(muted("Чтения режима с устройства нет: показывается последний отправленный. Яркость вентиляторов и "
-                            "RPM не читаются."))
+        self.last_mode = muted("")
+        lay.addWidget(self.last_mode)
+
+        bottom = QHBoxLayout()
+        data = QGroupBox("Данные охлаждения")
+        dl = QVBoxLayout(data)
+        values = QHBoxLayout()
+        for text in ("Помпа — RPM", "Радиатор — RPM", "Жидкость — °C"):
+            values.addWidget(muted(text))
+        dl.addLayout(values)
+        dl.addWidget(muted("Чтение датчиков устройства ещё не реализовано"))
+        bottom.addWidget(data, 1)
+        self.btn_apply = QPushButton("Применить режим")
+        self.btn_apply.setObjectName("primary")
+        bottom.addWidget(self.btn_apply, 0, Qt.AlignmentFlag.AlignBottom)
+        lay.addLayout(bottom)
         lay.addStretch()
         self.btn_apply.clicked.connect(self.apply)
-        self.btn_stop.clicked.connect(self.stop)
+        self.btn_service.clicked.connect(self.toggle_service)
         self.chk_auto.clicked.connect(self.autostart)
         self.refresh()
 
@@ -642,11 +660,18 @@ class CoolingPage(QWidget):
         return "balance"
 
     def apply(self):
+        self.start_service("restart")
+
+    def start_service(self, command):
+        if not unit_installed():
+            self.refresh()
+            return
         mode = self.mode()
         r = QMessageBox.question(
             self, "Подтверждение (эксперимент)",
-            f"Будет отправлен режим «{core.COOLING_LABELS[mode]}» (d0 40 + d0 41), затем сервис каждые "
-            f"{core.FEED_INTERVAL_S:g} с будет слать температуру CPU (d0 85).\nПротокол на этом устройстве не проверен. "
+            f"Сервис будет {'перезапущен' if command == 'restart' else 'запущен'} с выбранным режимом "
+            f"«{COOLING_TITLES[mode]}» (d0 40 + d0 41), затем каждые "
+            f"{core.FEED_INTERVAL_S:g} с будет слать температуру CPU (d0 85).\nРабота из Linux ещё не проверена. "
             f"Следи за температурой. Продолжить?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if r != QMessageBox.StandardButton.Yes:
@@ -657,7 +682,7 @@ class CoolingPage(QWidget):
         except OSError as e:
             QMessageBox.warning(self, "Ошибка", str(e))
             return
-        code, out = systemctl("restart", UNIT)
+        code, out = systemctl(command, UNIT)
         if code != 0:
             QMessageBox.warning(self, "Сервис не запущен", out or "systemctl вернул ошибку")
         self.s["cooling_mode"] = mode
@@ -667,8 +692,23 @@ class CoolingPage(QWidget):
             QMessageBox.warning(self, "Настройки не сохранены", str(e))
         self.refresh()
 
+    def toggle_service(self):
+        if not unit_installed():
+            self.refresh()
+            return
+        code, state = systemctl("is-active", UNIT)
+        if code == 0 and state == "active":
+            self.stop()
+        elif state in ("inactive", "failed"):
+            self.start_service("start")
+        else:
+            QMessageBox.warning(self, "Статус сервиса неизвестен", state or "systemctl вернул ошибку")
+            self.refresh()
+
     def stop(self):
-        systemctl("stop", UNIT)
+        code, out = systemctl("stop", UNIT)
+        if code != 0:
+            QMessageBox.warning(self, "Сервис не остановлен", out or "systemctl вернул ошибку")
         self.refresh()
 
     def autostart(self, checked):
@@ -679,20 +719,32 @@ class CoolingPage(QWidget):
 
     def refresh(self):
         inst = unit_installed()
-        for w in (self.btn_apply, self.btn_stop, self.chk_auto):
+        for w in (self.btn_apply, self.btn_service, self.chk_auto):
             w.setEnabled(inst)
+        try:
+            last = COOLING_TITLES.get(__import__("json").loads(core.COOLING_STATE.read_text())["mode"], "неизвестный")
+        except (OSError, ValueError, KeyError, TypeError):
+            last = "нет данных"
+        self.last_mode.setText(f"Последний отправленный режим: {last}. Обратного чтения с устройства нет.")
+        self.status.setToolTip("")
+        self.btn_service.setText("Запустить")
         if not inst:
             self.status.setText(badge("сервис не установлен — запусти install.sh", WARN))
+            self.chk_auto.setChecked(False)
             return
-        active = systemctl("is-active", UNIT)[1] == "active"
+        code, state = systemctl("is-active", UNIT)
+        active = code == 0 and state == "active"
         enabled = systemctl("is-enabled", UNIT)[1] == "enabled"
         self.chk_auto.setChecked(enabled)
-        try:
-            last = core.COOLING_LABELS.get(__import__("json").loads(core.COOLING_STATE.read_text())["mode"], "?")
-        except (OSError, ValueError, KeyError):
-            last = "нет данных"
-        self.status.setText(f"Сервис: {badge('работает', OK) if active else badge('остановлен', WARN)} "
-                            f"&nbsp; Последний отправленный режим: {last}")
+        if active:
+            self.status.setText(badge("Сервис работает; приём температуры устройством не подтверждён", OK))
+            self.btn_service.setText("Остановить")
+        elif state in ("inactive", "failed"):
+            self.status.setText(badge("Сервис остановлен" if state == "inactive" else "Ошибка сервиса", WARN))
+        else:
+            self.status.setText(badge("Статус сервиса неизвестен", WARN))
+            self.status.setToolTip(state)
+            self.btn_service.setEnabled(False)
 
 
 class MonitoringPage(QWidget):
