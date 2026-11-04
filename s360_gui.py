@@ -221,7 +221,7 @@ class LcdPage(QWidget):
         modes = QHBoxLayout()
         mode_group = QButtonGroup(self)
         mode_group.setExclusive(True)
-        for title in ("Изображение / GIF", "Мониторинг", "Часы", "Баннер", "Погода"):
+        for title in ("Изображение / GIF", "Мониторинг", "Часы"):
             button = QPushButton(title)
             button.setCheckable(True)
             mode_group.addButton(button)
@@ -253,10 +253,12 @@ class LcdPage(QWidget):
         preview_layout.addWidget(self.lbl_prev, 0, Qt.AlignmentFlag.AlignHCenter)
         self.lbl_orientation = muted("")
         self.lbl_orientation.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.update_orientation()
         preview_layout.addWidget(self.lbl_orientation)
-        preview_layout.addWidget(muted("Первый кадр после обработки. Поворот в подписи — локальная настройка; "
-                                       "результат проверь на LCD."))
+        self.lbl_device_orientation = muted("")
+        self.update_orientation()
+        preview_layout.addWidget(self.lbl_device_orientation)
+        preview_layout.addWidget(muted("Первый кадр после программной обработки. Поворот картинки по часовой стрелке "
+                                       "применяется к файлу; аппаратный поворот LCD задаётся отдельно."))
         preview_layout.addStretch()
         outer.addWidget(preview_box, 2)
 
@@ -312,7 +314,7 @@ class LcdPage(QWidget):
         self.chk_detach = QCheckBox("Разрешить временно отсоединить HID-драйвер от LCD (нужно для передачи)")
         form.addRow(self.lbl_file, self.btn_pick)
         form.addRow("Масштабирование", self.cmb_scale)
-        form.addRow("Поворот картинки", self.cmb_rot)
+        form.addRow("Поворот картинки (программный)", self.cmb_rot)
         form.addRow("Фон прозрачности", bg_row)
         form.addRow("Кадрирование X", self.sld_x)
         form.addRow("Кадрирование Y", self.sld_y)
@@ -339,7 +341,7 @@ class LcdPage(QWidget):
         self.cmb_dir.setCurrentIndex(max(0, self.cmb_dir.findData(int(self.s["device_direction"]))))
         self.btn_dir = QPushButton("Применить поворот экрана")
         self.pending_dir = None
-        advanced_form.addRow("Поворот экрана (эксперимент)", self.cmb_dir)
+        advanced_form.addRow("Поворот LCD (аппаратный, эксперимент)", self.cmb_dir)
         advanced_form.addRow(self.btn_dir)
         advanced_form.addRow(muted("0°/180° подтверждены захватом; 90°/270° — только анализом DLL. Неизвестно, сохранится ли поворот после "
                                    "выключения. Для 90°/270° файлы грузятся в слот R1 — после смены перезагрузи картинку."))
@@ -406,7 +408,9 @@ class LcdPage(QWidget):
             self.changed()
 
     def update_orientation(self):
-        self.lbl_orientation.setText(f"240 × 320 px · поворот {self.s['device_direction']}°")
+        self.lbl_orientation.setText(f"{core.W} × {core.H} px · поворот картинки {self.s['rotate']}°")
+        self.lbl_device_orientation.setText(
+            f"Аппаратный поворот LCD: {self.s['device_direction']}° (локальная настройка; приём не подтверждён)")
 
     # --- настройки
     def fps_value(self):
@@ -425,6 +429,8 @@ class LcdPage(QWidget):
                         edge_trim=self.spn_trim.value())
 
     def changed(self, *_):
+        self.s["rotate"] = int(self.cmb_rot.currentData())
+        self.update_orientation()
         self.btn_bg.setEnabled(self.cmb_bg.currentData() == "custom")
         color = QColor(self.background_value())
         self.bg_sample.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #8b93a3; border-radius: 4px;")
