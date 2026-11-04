@@ -4,7 +4,8 @@
 Принцип: рабочие функции работают, остальное показано как НЕДОСТУПНОЕ с причиной (без муляжей управления).
   Работает (проверено на железе): загрузка GIF/MP4 на LCD.
   Экспериментально (на этом устройстве не проверено): режимы кулера Silent/Balance/Game + передача температуры CPU.
-  Недоступно: яркость, поворот, вкл/выкл и режимы экрана, чтение RPM/температуры жидкости.
+  Поворот экрана: через публичный API ядра, 90°/270° экспериментальны.
+  Недоступно в GUI T1: яркость, вкл/выкл и режимы экрана, чтение RPM/температуры жидкости.
 """
 import datetime
 import re
@@ -238,18 +239,18 @@ class LcdPage(QWidget):
         self.pending_dir = None
         dl.addRow("Направление", self.cmb_dir)
         dl.addRow(self.btn_dir)
-        dl.addRow(muted("Команда из анализа DLL MSI, в твоих захватах её нет. Неизвестно, сохранится ли поворот после "
+        dl.addRow(muted("0°/180° подтверждены захватом; 90°/270° — только анализом DLL. Неизвестно, сохранится ли поворот после "
                         "выключения. Для 90°/270° файлы грузятся в слот R1 — после смены перезагрузи картинку."))
         left.addWidget(dbox)
 
-        na = QGroupBox("Недоступно: нет подтверждённого протокола")
+        na = QGroupBox("Недоступно в GUI T1")
         nl = QFormLayout(na)
         for label, widget in (("Включение/выключение", QCheckBox("Экран включён")), ("Яркость", QSlider(Qt.Orientation.Horizontal)),
                               ("Режимы экрана", QComboBox())):
             widget.setEnabled(False)
             nl.addRow(label, widget)
-        nl.addRow(muted("Яркость и поворот известны только из статического анализа DLL (не из захватов), включение и режимы "
-                        "(часы, монитор, погода, баннер) не найдены совсем. Нужны USBPcap-захваты MSI Center — см. README. "
+        nl.addRow(muted("Яркость, включение/выключение и часы поддерживаются ядром 0.7, но ещё не подключены в GUI T1. "
+                        "Мониторинг на LCD недоступен: нет подтверждённого протокола. "
                         "Поворот самой картинки (выше) делается программно и работает без этого."))
         left.addWidget(na)
         left.addStretch()
@@ -332,7 +333,7 @@ class LcdPage(QWidget):
             png = Path(self.tmp.name) / "preview.png"
             core.preview_png(Path(self.src), png)
             self.lbl_prev.setPixmap(QPixmap(str(png)))
-        except core.S360Error as e:
+        except (core.S360Error, OSError) as e:
             self.lbl_prev.setText("нет предпросмотра")
             self.log.appendPlainText(f"предпросмотр: {e}")
 
@@ -349,6 +350,8 @@ class LcdPage(QWidget):
 
     def start_worker(self, plan, sha, kind):
         self.panel.setEnabled(False)
+        self.btn_dir.setEnabled(False)
+        self.cmb_dir.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.prog.setValue(0)
         self.log.appendPlainText(f"отправка ({kind}): {len(plan)} пакетов, {sha[:16]}")
@@ -368,7 +371,7 @@ class LcdPage(QWidget):
         try:
             self.apply_enc()
             data = core.load_media(Path(self.src))
-        except core.S360Error as e:
+        except (core.S360Error, OSError) as e:
             QMessageBox.warning(self, "Не удалось подготовить файл", str(e))
             return
         finally:
@@ -402,7 +405,8 @@ class LcdPage(QWidget):
             return
         r = QMessageBox.question(
             self, "Поворот экрана (эксперимент)",
-            f"Будет отправлена команда cmd 1a: {deg}°.\nОна взята из анализа DLL MSI и в твоих захватах не встречалась. "
+            f"Поворот экрана {deg}°: команда, сохранение во флеш и повторный выбор слота S7.\n"
+            f"0°/180° подтверждены захватом; 90°/270° — только анализом DLL. "
             f"Неизвестно, сохранится ли поворот после выключения. Вернуть можно командой на 0° или через MSI Center.\n"
             f"Для 90°/270° файлы будут грузиться в слот R1 (по тому же анализу). Отправить?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
@@ -410,300 +414,6 @@ class LcdPage(QWidget):
             return
         self.pending_dir = deg
         self.start_worker(core.build_direction_plan(deg), f"direction:{deg}", "direction")
-
-    def cancel(self):
-        self._cancel = True
-
-    def run(self):
-        try:
-            core.do_send(self.plan, self.detach_ok, self.sha,
-                         progress=lambda i, n: self.progress.emit(i, n), cancel=lambda: self._cancel, kind=self.kind)
-        except core.S360Error as e:
-            self.failed.emit(str(e), e.uncertain)
-            return
-        except Exception as e:                      # непредвиденное: считаем состояние неизвестным
-            self.failed.emit(repr(e), True)
-            return
-        self.done_ok.emit()
-
-
-class DashboardPage(QWidget):
-    def __init__(self):
-        super().__init__()
-        lay = QVBoxLayout(self)
-        box = QGroupBox("Устройства и состояние")
-        form = QFormLayout(box)
-        self.lcd, self.cooler, self.last_lcd, self.svc, self.cpu = (QLabel() for _ in range(5))
-        for lbl in (self.lcd, self.cooler, self.last_lcd, self.svc, self.cpu):
-            lbl.setTextFormat(Qt.TextFormat.RichText)
-        form.addRow("LCD-контроллер 0db0:9ba6", self.lcd)
-        form.addRow("Кулер 0db0:6a05", self.cooler)
-        form.addRow("Последняя загрузка на LCD", self.last_lcd)
-        form.addRow("Сервис температуры (кулер)", self.svc)
-        form.addRow("Температура CPU", self.cpu)
-        lay.addWidget(box)
-        lay.addWidget(muted("Статус «хост отправил» означает только, что USB-пакеты ушли. Подтверждения от экрана в протоколе нет "
-                            "— результат смотри глазами."))
-        lay.addStretch()
-        self.refresh()
-
-    def refresh(self):
-        yes = lambda ok: badge("найден", OK) if ok else badge("не найден", BAD)
-        self.lcd.setText(yes(core.usb_present(core.VID, core.PID)))
-        self.cooler.setText(yes(core.usb_present(core.COOLER_VID, core.COOLER_PID)))
-        st = core.read_state()
-        names = {"HOST_COMPLETE_UNCONFIRMED": badge("хост отправил (экран не подтверждён)", WARN),
-                 "IN_PROGRESS": badge("не завершена — состояние неизвестно", BAD),
-                 "UNCERTAIN": badge("ошибка — состояние неизвестно", BAD),
-                 "NOT_STARTED": badge("не началась", OK)}
-        if st:
-            when = datetime.datetime.fromtimestamp(st.get("time", 0)).strftime("%d.%m %H:%M:%S")
-            kind = st.get("kind", "upload")
-            tag = (st.get("sha256") or "") if kind == "direction" else (st.get("sha256") or "")[:8]
-            what = "поворот экрана" if kind == "direction" else "загрузка"
-            self.last_lcd.setText(f"{what}: {names.get(st['status'], st['status'])} — {when}" + (f", {tag}" if tag else ""))
-        else:
-            self.last_lcd.setText("нет данных")
-        if not unit_installed():
-            self.svc.setText(badge("не установлен (запусти install.sh)", WARN))
-        else:
-            active = systemctl("is-active", UNIT)[1] == "active"
-            self.svc.setText(badge("работает", OK) if active else badge("остановлен", WARN))
-        try:
-            self.cpu.setText(f"{core.read_cpu_temp()} °C")
-        except core.S360Error as e:
-            self.cpu.setText(badge(str(e), WARN))
-
-
-class LcdPage(QWidget):
-    def __init__(self, settings):
-        super().__init__()
-        self.s = settings
-        self.src = None
-        self.worker = None
-        self.tmp = tempfile.TemporaryDirectory()
-        outer = QHBoxLayout(self)
-
-        left = QVBoxLayout()
-        self.panel = QWidget()
-        pl = QVBoxLayout(self.panel)
-        pl.setContentsMargins(0, 0, 0, 0)
-        box = QGroupBox("Картинка / GIF на экран")
-        form = QFormLayout(box)
-        self.btn_pick = QPushButton("Выбрать GIF или MP4…")
-        self.lbl_file = muted("файл не выбран")
-        self.cmb_scale = QComboBox()
-        for title, key in (("Заполнить (с обрезкой)", "fill"), ("Вписать (чёрные полосы)", "fit"),
-                           ("Растянуть (искажает)", "stretch")):
-            self.cmb_scale.addItem(title, key)
-        self.cmb_scale.setCurrentIndex(max(0, self.cmb_scale.findData(self.s["scale"])))
-        self.sld_x, self.sld_y = QSlider(Qt.Orientation.Horizontal), QSlider(Qt.Orientation.Horizontal)
-        for sld, key in ((self.sld_x, "focus_x"), (self.sld_y, "focus_y")):
-            sld.setRange(0, 100)
-            sld.setValue(int(float(self.s[key]) * 100))
-        self.cmb_rot = QComboBox()
-        for deg in (0, 90, 180, 270):
-            self.cmb_rot.addItem(f"{deg}°", deg)
-        self.cmb_rot.setCurrentIndex(max(0, self.cmb_rot.findData(int(self.s["rotate"]))))
-        self.cmb_bg = QComboBox()
-        self.cmb_bg.setEditable(True)
-        self.cmb_bg.addItems(["black", "white", "gray"])
-        self.cmb_bg.setCurrentText(str(self.s["background"]))
-        self.spn_trim = QSpinBox()
-        self.spn_trim.setRange(0, 3)
-        self.spn_trim.setValue(int(self.s["edge_trim"]))
-        self.edt_fps = QLineEdit(str(self.s["fps"] or ""))
-        self.edt_fps.setPlaceholderText("20/3 (проверено)")
-        self.spn_sec = QDoubleSpinBox()
-        self.spn_sec.setRange(0, 60)
-        self.spn_sec.setSingleStep(0.05)
-        self.spn_sec.setDecimals(2)
-        self.spn_sec.setSpecialValueText("без обрезки")
-        self.spn_sec.setValue(float(self.s["max_seconds"] or 0))
-        self.chk_select = QCheckBox("Выбор слота перед загрузкой (без него экран не менялся)")
-        self.chk_select.setChecked(bool(self.s["with_select"]))
-        self.chk_detach = QCheckBox("Разрешить временно отсоединить HID-драйвер от LCD (нужно для передачи)")
-        form.addRow(self.btn_pick)
-        form.addRow(self.lbl_file)
-        form.addRow("Масштаб", self.cmb_scale)
-        form.addRow("Поворот картинки", self.cmb_rot)
-        form.addRow("Фон (прозрачность, полосы)", self.cmb_bg)
-        form.addRow("Подрезка края, px", self.spn_trim)
-        form.addRow("Обрезка: X", self.sld_x)
-        form.addRow("Обрезка: Y", self.sld_y)
-        form.addRow("FPS", self.edt_fps)
-        form.addRow("Длительность", self.spn_sec)
-        form.addRow(muted("Проверено на этом экране: 20/3 fps и до 1,95 с. Для плавности повышай ступенями (README); "
-                          "при сбое восстановление — через MSI Center."))
-        form.addRow(self.chk_select)
-        form.addRow(self.chk_detach)
-        pl.addWidget(box)
-        self.btn_send = QPushButton("Отправить на LCD")
-        self.btn_send.setObjectName("primary")
-        pl.addWidget(self.btn_send)
-        left.addWidget(self.panel)
-        self.btn_cancel = QPushButton("Остановить")
-        self.btn_cancel.setEnabled(False)
-        self.prog = QProgressBar()
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumHeight(110)
-        left.addWidget(self.btn_cancel)
-        left.addWidget(self.prog)
-        left.addWidget(self.log)
-
-        dbox = QGroupBox("Поворот экрана (эксперимент)")
-        dl = QFormLayout(dbox)
-        self.cmb_dir = QComboBox()
-        for deg in core.DIRECTIONS:
-            self.cmb_dir.addItem(f"{deg}°", deg)
-        self.cmb_dir.setCurrentIndex(max(0, self.cmb_dir.findData(int(self.s["device_direction"]))))
-        self.btn_dir = QPushButton("Применить поворот экрана")
-        self.pending_dir = None
-        dl.addRow("Направление", self.cmb_dir)
-        dl.addRow(self.btn_dir)
-        dl.addRow(muted("Команда из анализа DLL MSI, в твоих захватах её нет. Неизвестно, сохранится ли поворот после "
-                        "выключения. Для 90°/270° файлы грузятся в слот R1 — после смены перезагрузи картинку."))
-        left.addWidget(dbox)
-
-        na = QGroupBox("Недоступно: нет подтверждённого протокола")
-        nl = QFormLayout(na)
-        for label, widget in (("Включение/выключение", QCheckBox("Экран включён")), ("Яркость", QSlider(Qt.Orientation.Horizontal)),
-                              ("Режимы экрана", QComboBox())):
-            widget.setEnabled(False)
-            nl.addRow(label, widget)
-        nl.addRow(muted("Яркость и поворот известны только из статического анализа DLL (не из захватов), включение и режимы "
-                        "(часы, монитор, погода, баннер) не найдены совсем. Нужны USBPcap-захваты MSI Center — см. README. "
-                        "Поворот самой картинки (выше) делается программно и работает без этого."))
-        left.addWidget(na)
-        left.addStretch()
-        outer.addLayout(left, 3)
-
-        right = QVBoxLayout()
-        self.lbl_prev = QLabel("предпросмотр")
-        self.lbl_prev.setObjectName("preview")
-        self.lbl_prev.setFixedSize(core.W + 4, core.H + 4)
-        self.lbl_prev.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right.addWidget(self.lbl_prev)
-        right.addWidget(muted("Первый кадр после масштабирования, 240×320 (как в эталонном файле). Реальная ориентация "
-                              "на экране не проверялась."))
-        right.addStretch()
-        outer.addLayout(right, 1)
-
-        self.timer = QTimer(self)
-        self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self.update_preview)
-        self.btn_pick.clicked.connect(self.pick)
-        self.btn_send.clicked.connect(self.send)
-        self.btn_cancel.clicked.connect(self.cancel)
-        self.btn_dir.clicked.connect(self.apply_direction)
-        for w in (self.cmb_scale, self.cmb_rot):
-            w.currentIndexChanged.connect(self.changed)
-        self.cmb_bg.currentTextChanged.connect(self.changed)
-        for w in (self.sld_x, self.sld_y):
-            w.valueChanged.connect(self.changed)
-        self.edt_fps.textChanged.connect(self.changed)
-        self.spn_sec.valueChanged.connect(self.changed)
-        self.spn_trim.valueChanged.connect(self.changed)
-        self.chk_select.toggled.connect(self.changed)
-        self.changed()
-
-    # --- настройки
-    def fps_value(self):
-        t = self.edt_fps.text().strip()
-        if not t:
-            return None
-        if not re.fullmatch(r"\d+(\.\d+)?(/\d+)?", t) or t.startswith("0"):
-            raise core.S360Error("FPS: число или дробь, например 10 или 20/3")
-        return t
-
-    def apply_enc(self):
-        core.ENC.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
-                        scale=self.cmb_scale.currentData(), focus_x=self.sld_x.value() / 100.0,
-                        focus_y=self.sld_y.value() / 100.0, rotate=int(self.cmb_rot.currentData()),
-                        background=self.cmb_bg.currentText().strip() or "black",
-                        edge_trim=self.spn_trim.value())
-
-    def changed(self, *_):
-        fill = self.cmb_scale.currentData() == "fill"
-        self.sld_x.setEnabled(fill)
-        self.sld_y.setEnabled(fill)
-        try:
-            self.s.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
-                          scale=self.cmb_scale.currentData(), focus_x=self.sld_x.value() / 100.0,
-                          focus_y=self.sld_y.value() / 100.0, with_select=self.chk_select.isChecked(),
-                          rotate=int(self.cmb_rot.currentData()),
-                          background=self.cmb_bg.currentText().strip() or "black",
-                          edge_trim=self.spn_trim.value())
-            core.save_settings(self.s)
-        except (core.S360Error, OSError):
-            pass
-        self.timer.start(300)
-
-    # --- предпросмотр
-    def pick(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Выбор файла", str(Path.home()), "GIF/MP4 (*.gif *.mp4)")
-        if path:
-            self.src = path
-            self.lbl_file.setText(path)
-            self.update_preview()
-
-    def update_preview(self):
-        if not self.src or self.worker is not None:
-            return
-        try:
-            self.apply_enc()
-            png = Path(self.tmp.name) / "preview.png"
-            core.preview_png(Path(self.src), png)
-            self.lbl_prev.setPixmap(QPixmap(str(png)))
-        except core.S360Error as e:
-            self.lbl_prev.setText("нет предпросмотра")
-            self.log.appendPlainText(f"предпросмотр: {e}")
-
-    # --- отправка
-    def send(self):
-        if not self.src:
-            QMessageBox.information(self, "S360", "Сначала выберите файл.")
-            return
-        if self.worker is not None:
-            return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self.apply_enc()
-            data = core.load_media(Path(self.src))
-        except core.S360Error as e:
-            QMessageBox.warning(self, "Не удалось подготовить файл", str(e))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-        sha = core.sha256(data)
-        st = core.read_state()
-        if st and st["status"] in ("IN_PROGRESS", "UNCERTAIN"):
-            r = QMessageBox.question(
-                self, "Прошлая операция не завершена",
-                f"Прошлая загрузка: {st['status']}. Состояние экрана неизвестно.\nЯ проверил экран и хочу продолжить?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-            if r != QMessageBox.StandardButton.Yes:
-                return
-        ref = "совпадает с проверенным эталоном" if sha == core.REFERENCE_SHA256 else \
-            "НЕ эталонный файл: совместимость с прошивкой проверена только на параметрах 20/3 fps, 1.95 с, baseline"
-        r = QMessageBox.question(
-            self, "Подтверждение",
-            f"Файл: {len(data)} байт\nSHA256: {sha[:16]}…\n{ref}\n\nЭто ПЕРЕЗАПИШЕТ слот S7/R0 на экране "
-            f"({core.SLOT_NAME.decode()}). Отката нет.\nОтправить?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        if r != QMessageBox.StandardButton.Yes:
-            return
-        plan = ([] if not self.chk_select.isChecked() else core.build_select_plan()) + core.build_upload_plan(data)
-        self.panel.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
-        self.prog.setValue(0)
-        self.log.appendPlainText(f"отправка: {len(plan)} пакетов, SHA256 {sha[:12]}…")
-        self.worker = SendWorker(plan, self.chk_detach.isChecked(), sha)
-        self.worker.progress.connect(self.on_progress)
-        self.worker.done_ok.connect(self.on_done)
-        self.worker.failed.connect(self.on_failed)
-        self.worker.start()
 
     def cancel(self):
         if self.worker is not None:
@@ -718,6 +428,8 @@ class LcdPage(QWidget):
         self.worker.wait()
         self.worker = None
         self.panel.setEnabled(True)
+        self.btn_dir.setEnabled(True)
+        self.cmb_dir.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.changed()
 
@@ -725,8 +437,11 @@ class LcdPage(QWidget):
         self.finish_ui()
         if self.pending_dir is not None:
             self.s["device_direction"] = self.pending_dir
-            core.save_settings(self.s)
             self.pending_dir = None
+            try:
+                core.save_settings(self.s)
+            except OSError as e:
+                QMessageBox.warning(self, "Настройки не сохранены", str(e))
         self.log.appendPlainText("хост отправил все пакеты")
         QMessageBox.information(self, "Готово (хост)", "Все пакеты отправлены. Подтверждения от экрана нет — посмотрите, "
                                 "что на нём отображается.")
@@ -814,7 +529,10 @@ class CoolingPage(QWidget):
         if code != 0:
             QMessageBox.warning(self, "Сервис не запущен", out or "systemctl вернул ошибку")
         self.s["cooling_mode"] = mode
-        core.save_settings(self.s)
+        try:
+            core.save_settings(self.s)
+        except OSError as e:
+            QMessageBox.warning(self, "Настройки не сохранены", str(e))
         self.refresh()
 
     def stop(self):
@@ -891,7 +609,11 @@ class SettingsPage(QWidget):
         lay.addStretch()
 
     def reset(self):
-        core.save_settings(core.DEFAULT_SETTINGS)
+        try:
+            core.save_settings(core.DEFAULT_SETTINGS)
+        except OSError as e:
+            QMessageBox.warning(self, "Настройки не сброшены", str(e))
+            return
         QMessageBox.information(self, "S360", "Настройки сброшены. Перезапусти приложение.")
 
 
