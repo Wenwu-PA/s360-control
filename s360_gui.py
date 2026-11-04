@@ -105,29 +105,82 @@ class SendWorker(QThread):
 
 
 class DashboardPage(QWidget):
-    def __init__(self):
+    configure_lcd = Signal()
+
+    def __init__(self, settings):
         super().__init__()
+        self.s = settings
         lay = QVBoxLayout(self)
-        box = QGroupBox("Устройства и состояние")
+        row = QHBoxLayout()
+        cpu_box = QGroupBox("CPU")
+        cpu_layout = QVBoxLayout(cpu_box)
+        self.cpu = QLabel()
+        self.cpu.setWordWrap(True)
+        cpu_layout.addWidget(self.cpu)
+        model = "Модель процессора не прочитана"
+        try:
+            for line in Path("/proc/cpuinfo").read_text().splitlines():
+                key, sep, value = line.partition(":")
+                if sep and key.strip() == "model name" and value.strip():
+                    model = value.strip()
+                    break
+        except OSError:
+            pass
+        cpu_layout.addWidget(muted(model))
+        cpu_layout.addWidget(muted("Температура из системного датчика"))
+        row.addWidget(cpu_box, 1)
+
+        box = QGroupBox("Подключение")
         form = QFormLayout(box)
-        self.lcd, self.cooler, self.last_lcd, self.svc, self.cpu = (QLabel() for _ in range(5))
+        self.lcd, self.cooler, self.last_lcd, self.svc = (QLabel() for _ in range(4))
         for lbl in (self.lcd, self.cooler, self.last_lcd, self.svc, self.cpu):
             lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setWordWrap(True)
         form.addRow("LCD-контроллер 0db0:9ba6", self.lcd)
-        form.addRow("Кулер 0db0:6a05", self.cooler)
-        form.addRow("Последняя загрузка на LCD", self.last_lcd)
+        form.addRow("Контроллер охлаждения 0db0:6a05", self.cooler)
+        row.addWidget(box, 2)
+        lay.addLayout(row)
+
+        upload_box = QGroupBox("Последняя загрузка на экран")
+        upload_form = QFormLayout(upload_box)
+        self.last_file, self.last_upload = QLabel(), QLabel()
+        self.last_file.setTextFormat(Qt.TextFormat.PlainText)
+        self.last_file.setWordWrap(True)
+        self.last_file.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.last_upload.setWordWrap(True)
+        upload_form.addRow("Файл", self.last_file)
+        upload_form.addRow("Отправка из GUI", self.last_upload)
+        upload_form.addRow(muted("Проверь результат на LCD: устройство не присылает подтверждение"))
+        lay.addWidget(upload_box)
+
+        actions = QGroupBox("Изображение на экране")
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.addWidget(muted("Загрузка GIF или MP4 и настройка кадрирования."), 1)
+        configure = QPushButton("Настроить LCD")
+        configure.setObjectName("primary")
+        configure.clicked.connect(self.configure_lcd.emit)
+        actions_layout.addWidget(configure)
+        lay.addWidget(actions)
+
+        state_box = QGroupBox("Текущее состояние")
+        form = QFormLayout(state_box)
+        form.addRow("Последняя операция LCD (журнал)", self.last_lcd)
         form.addRow("Сервис температуры (кулер)", self.svc)
-        form.addRow("Температура CPU", self.cpu)
-        lay.addWidget(box)
-        lay.addWidget(muted("Статус «хост отправил» означает только, что USB-пакеты ушли. Подтверждения от экрана в протоколе нет "
-                            "— результат смотри глазами."))
+        lay.addWidget(state_box)
         lay.addStretch()
         self.refresh()
 
     def refresh(self):
-        yes = lambda ok: badge("найден", OK) if ok else badge("не найден", BAD)
+        yes = lambda ok: badge("Подключён", OK) if ok else badge("Не найден", BAD)
         self.lcd.setText(yes(core.usb_present(core.VID, core.PID)))
         self.cooler.setText(yes(core.usb_present(core.COOLER_VID, core.COOLER_PID)))
+        self.last_file.setText(self.s.get("last_file") or "Нет данных о файле, отправленном из GUI")
+        when = self.s.get("last_upload_time")
+        if when is not None:
+            when = datetime.datetime.fromtimestamp(when).strftime("%d.%m.%Y %H:%M:%S")
+            self.last_upload.setText(f"{when} — хост отправил; результат на экране не подтверждён")
+        else:
+            self.last_upload.setText("Время и статус отправки из GUI не сохранены")
         st = core.read_state()
         names = {"HOST_COMPLETE_UNCONFIRMED": badge("хост отправил (экран не подтверждён)", WARN),
                  "IN_PROGRESS": badge("не завершена — состояние неизвестно", BAD),
@@ -157,6 +210,7 @@ class LcdPage(QWidget):
         super().__init__()
         self.s = settings
         self.src = None
+        self.pending_file = None
         self.worker = None
         self.tmp = tempfile.TemporaryDirectory()
         outer = QHBoxLayout(self)
@@ -349,6 +403,7 @@ class LcdPage(QWidget):
         return True
 
     def start_worker(self, plan, sha, kind):
+        self.pending_file = Path(self.src).name if kind == "upload" else None
         self.panel.setEnabled(False)
         self.btn_dir.setEnabled(False)
         self.cmb_dir.setEnabled(False)
@@ -438,16 +493,21 @@ class LcdPage(QWidget):
         if self.pending_dir is not None:
             self.s["device_direction"] = self.pending_dir
             self.pending_dir = None
-            try:
-                core.save_settings(self.s)
-            except OSError as e:
-                QMessageBox.warning(self, "Настройки не сохранены", str(e))
+        elif self.pending_file is not None:
+            self.s["last_file"] = self.pending_file
+            self.s["last_upload_time"] = datetime.datetime.now().timestamp()
+            self.pending_file = None
+        try:
+            core.save_settings(self.s)
+        except OSError as e:
+            QMessageBox.warning(self, "Настройки не сохранены", str(e))
         self.log.appendPlainText("хост отправил все пакеты")
         QMessageBox.information(self, "Готово (хост)", "Все пакеты отправлены. Подтверждения от экрана нет — посмотрите, "
                                 "что на нём отображается.")
 
     def on_failed(self, msg, uncertain):
         self.pending_dir = None
+        self.pending_file = None
         self.finish_ui()
         self.log.appendPlainText(f"ОШИБКА: {msg}")
         QMessageBox.critical(self, "Ошибка", msg + ("\n\nСостояние экрана неизвестно. Повторять автоматически не нужно."
@@ -624,7 +684,8 @@ class MainWindow(QMainWindow):
         self.resize(1040, 720)
         settings = core.load_settings()
         overview = QTabWidget()
-        overview.addTab(DashboardPage(), "Состояние")
+        dashboard = DashboardPage(settings)
+        overview.addTab(dashboard, "Состояние")
         overview.addTab(MonitoringPage(), "Мониторинг")
         overview.addTab(SettingsPage(settings), "Настройки")
         overview.currentChanged.connect(self.tick)
@@ -633,6 +694,7 @@ class MainWindow(QMainWindow):
         self.stack = QTabWidget()
         for name, page in self.pages:
             self.stack.addTab(page, name)
+        dashboard.configure_lcd.connect(lambda: self.stack.setCurrentIndex(1))
         self.stack.setCurrentIndex(1)
         root = QWidget()
         layout = QVBoxLayout(root)

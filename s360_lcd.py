@@ -56,7 +56,8 @@ FEED_INTERVAL_S = 2.0
 
 DEFAULT_SETTINGS = {"fps": "15", "max_seconds": None, "scale": "fill", "focus_x": 0.5, "focus_y": 0.5,
                     "with_select": True, "cooling_mode": "balance", "background": "black", "rotate": 0,
-                    "device_direction": 0, "edge_trim": 0, "brightness": 100}
+                    "device_direction": 0, "edge_trim": 0, "brightness": 100,
+                    "last_file": None, "last_upload_time": None}
 
 
 # Проверено НА ЭТОМ экране (отправка и показ без зависаний): 20/3, 10 и 15 fps; анимация до ~2,5 с (37 кадров, 146 КБ).
