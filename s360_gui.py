@@ -3,13 +3,14 @@
 
 Принцип: рабочие функции работают, остальное показано как НЕДОСТУПНОЕ с причиной (без муляжей управления).
   Работает (проверено на железе): загрузка GIF/MP4 на LCD.
-  Экспериментально (на этом устройстве не проверено): режимы кулера Silent/Balance/Game + передача температуры CPU.
+  Экспериментально (на этом устройстве не проверено): режимы кулера Silent/Balance/Game/Custom + передача температуры CPU.
   Поворот экрана: через публичный API ядра, 90°/270° экспериментальны.
   Яркость и вкл/выкл: через API ядра, с подтверждением записи во флеш.
   Часы: подтверждённый стиль 1, местное время перед отправкой, без автосинхронизации.
   Недоступно в GUI: другие режимы экрана, чтение RPM/температуры жидкости.
 """
 import datetime
+import json
 import re
 import subprocess
 import sys
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDial
 import s360_lcd as core
 
 UNIT = "s360-feed.service"
-COOLING_TITLES = {"silent": "Тихий", "balance": "Сбалансированный", "game": "Игровой"}
+COOLING_TITLES = {"silent": "Тихий", "balance": "Сбалансированный", "game": "Игровой", "custom": "Свой профиль"}
 OK, BAD, WARN = "#4ade80", "#f87171", "#fbbf24"
 
 STYLE = """
@@ -345,8 +346,9 @@ class LcdPage(QWidget):
         advanced_form.addRow("FPS", self.edt_fps)
         advanced_form.addRow("Длительность, с", self.spn_sec)
         advanced_form.addRow("Подрезка края, px", self.spn_trim)
-        advanced_form.addRow(muted("Проверено на этом экране: 20/3, 10 и 15 fps, анимация до ~2,5 с (37 кадров). Больше — "
-                                   "пробуй ступенями; при сбое восстановление — через MSI Center."))
+        advanced_form.addRow(muted("На этом экране воспроизводились файлы 20/3, 10 и 15 fps до ~2,5 с, "
+                                   "а также GIF 60 FPS / 8,95 с. Это наблюдения, не предел длительности "
+                                   "и не гарантия для других файлов."))
         advanced_form.addRow(self.chk_select)
         advanced_form.addRow(self.chk_detach)
         self.cmb_dir = QComboBox()
@@ -657,7 +659,8 @@ class LcdPage(QWidget):
             "НЕ эталонный файл: прошивка принимала файлы такого вида (baseline), но каждый новый — на твой риск"
         dur, frames, rate = core.probe_mp4(data)
         info = f"\nДлительность: {dur:.2f} с, кадров: {frames}, fps: {rate}" if dur is not None else ""
-        extra = ("\n\nВЫШЕ проверенного (до 15 fps и ~2,5 с): возможно зависание картинки; "
+        extra = ("\n\nЭти параметры не проверены на наших файлах (наблюдались до ~2,5 с при 20/3, 10, 15 fps "
+                 "и отдельный GIF 60 FPS / 8,95 с): возможно зависание картинки; "
                  "восстановить можно через MSI Center.") if core.beyond_tested(dur, rate) else ""
         r = QMessageBox.question(
             self, "Подтверждение",
@@ -756,7 +759,13 @@ class CoolingPage(QWidget):
     def __init__(self, settings):
         super().__init__()
         self.s = settings
-        lay = QVBoxLayout(self)
+        page = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        scroll.setWidget(content)
+        page.addWidget(scroll)
+        lay = QVBoxLayout(content)
         lay.addWidget(QLabel("Управление охлаждением"))
         warn = QLabel("Экспериментальная функция. Формат команд сверен с захватами MSI Center этого устройства; "
                       "работа охлаждения из Linux ещё не проверена. Режим работает вместе с "
@@ -770,7 +779,7 @@ class CoolingPage(QWidget):
         self.group.setExclusive(True)
         self.buttons = {}
         for key, description in (("silent", "Минимум шума"), ("balance", "Повседневная работа"),
-                                 ("game", "Приоритет охлаждения")):
+                                 ("game", "Приоритет охлаждения"), ("custom", "Свои кривые · 5 каналов")):
             b = QPushButton(f"{COOLING_TITLES[key]}\n\n{description}")
             b.setProperty("coolingCard", True)
             b.setCheckable(True)
@@ -779,6 +788,57 @@ class CoolingPage(QWidget):
             row.addWidget(b, 1)
         self.buttons.get(self.s["cooling_mode"], self.buttons["balance"]).setChecked(True)
         lay.addLayout(row)
+
+        self.curves_box = QGroupBox("Свой профиль · локальный редактор")
+        editor = QVBoxLayout(self.curves_box)
+        editor.addWidget(muted("4 точки на канал: температуры строго растут, обороты не падают. "
+                               "Помпа — не ниже 60%. Проверка выполняется ядром при сохранении и применении."))
+        tabs = QTabWidget()
+        self.curve_inputs = {}
+        titles = ("Радиатор 1", "Радиатор 2", "Радиатор 3", "Водоблок", "Помпа")
+        for channel, title in zip(core.CHANNELS, titles):
+            tab = QWidget()
+            form = QFormLayout(tab)
+            self.curve_inputs[channel] = {"temp": [], "duty": []}
+            for point in range(4):
+                row = QHBoxLayout()
+                for key, suffix in (("temp", " °C"), ("duty", " %")):
+                    spin = QSpinBox()
+                    spin.setRange(0, 100)
+                    spin.setSuffix(suffix)
+                    self.curve_inputs[channel][key].append(spin)
+                    spin.valueChanged.connect(lambda: self.curves_status.setText(
+                        "Есть локальные изменения; они не сохранены и не применены."))
+                    row.addWidget(spin)
+                form.addRow(f"Точка {point + 1}", row)
+            tabs.addTab(tab, title)
+        editor.addWidget(tabs)
+        self.curves_status = muted("")
+        editor.addWidget(self.curves_status)
+        actions = QHBoxLayout()
+        self.btn_save_curves = QPushButton("Сохранить профиль")
+        self.btn_reset_curves = QPushButton("Сбросить к стандартным")
+        actions.addWidget(self.btn_save_curves)
+        actions.addWidget(self.btn_reset_curves)
+        editor.addLayout(actions)
+        editor.addWidget(muted("Сохранение и сброс меняют только локальные данные. Для отправки выбери "
+                               "«Свой профиль» и нажми «Применить режим» или «Запустить»."))
+        lay.addWidget(self.curves_box)
+        self.btn_save_curves.clicked.connect(self.save_curves)
+        self.btn_reset_curves.clicked.connect(self.reset_curves)
+        for button in self.buttons.values():
+            button.toggled.connect(lambda: self.curves_box.setVisible(self.mode() == "custom"))
+        self.curves_box.setVisible(self.mode() == "custom")
+        try:
+            curves = core.load_curves() if core.CURVES_FILE.exists() else core.DEFAULT_CURVES
+            self.set_curves(curves)
+            self.curves_status.setText("Локальный профиль загружен; это не чтение настроек устройства.")
+        except (core.S360Error, OSError, AttributeError, TypeError) as e:
+            self.set_curves(core.DEFAULT_CURVES)
+            self.curves_status.setText(f"Не удалось загрузить профиль: {e}. Показаны стандартные точки; "
+                                       "исходный файл не изменён.")
+        self.cooler_connection = muted("")
+        lay.addWidget(self.cooler_connection)
 
         box = QGroupBox("Передача температуры CPU")
         bl = QVBoxLayout(box)
@@ -825,11 +885,53 @@ class CoolingPage(QWidget):
     def apply(self):
         self.start_service("restart")
 
+    def set_curves(self, curves):
+        for channel in core.CHANNELS:
+            for key in ("temp", "duty"):
+                for spin, value in zip(self.curve_inputs[channel][key], curves[channel][key]):
+                    spin.setValue(value)
+
+    def reset_curves(self):
+        self.set_curves(core.DEFAULT_CURVES)
+        self.curves_status.setText("Стандартные точки восстановлены в редакторе; не сохранены и не применены.")
+
+    def editor_curves(self):
+        return core.validate_curves({channel: {key: [spin.value() for spin in spins]
+                                              for key, spins in values.items()}
+                                     for channel, values in self.curve_inputs.items()})
+
+    def write_curves(self, curves):
+        # Атомарная замена: ошибка записи не должна оставлять обрезанный JSON для сервиса.
+        core.CURVES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=core.CURVES_FILE.parent,
+                                         prefix=".curves-", suffix=".json", delete=False) as f:
+            temporary = Path(f.name)
+            try:
+                f.write(json.dumps(curves, ensure_ascii=False, indent=2) + "\n")
+                f.close()
+                temporary.replace(core.CURVES_FILE)
+            finally:
+                temporary.unlink(missing_ok=True)
+        self.curves_status.setText("Профиль сохранён локально; приём устройством не подтверждён. "
+                                   "Для применения нужен запуск или перезапуск сервиса.")
+
+    def save_curves(self):
+        try:
+            self.write_curves(self.editor_curves())
+        except (core.S360Error, OSError) as e:
+            self.curves_status.setText(f"Профиль не сохранён: {e}")
+            QMessageBox.warning(self, "Профиль не сохранён", str(e))
+
     def start_service(self, command):
         if not unit_installed():
             self.refresh()
             return
         mode = self.mode()
+        try:
+            curves = self.editor_curves() if mode == "custom" else None
+        except core.S360Error as e:
+            QMessageBox.warning(self, "Некорректный профиль", str(e))
+            return
         r = QMessageBox.question(
             self, "Подтверждение (эксперимент)",
             f"Сервис будет {'перезапущен' if command == 'restart' else 'запущен'} с выбранным режимом "
@@ -839,7 +941,13 @@ class CoolingPage(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if r != QMessageBox.StandardButton.Yes:
             return
+        if mode == "custom" and not core.usb_present(core.COOLER_VID, core.COOLER_PID):
+            QMessageBox.warning(self, "Устройство не найдено", "Контроллер охлаждения отключён. Профиль не применён.")
+            self.refresh()
+            return
         try:
+            if curves is not None:
+                self.write_curves(curves)
             core.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             core.COOLING_ENV.write_text(f"MODE={mode}\n")
         except OSError as e:
@@ -882,6 +990,9 @@ class CoolingPage(QWidget):
 
     def refresh(self):
         inst = unit_installed()
+        connected = core.usb_present(core.COOLER_VID, core.COOLER_PID)
+        self.cooler_connection.setText("Контроллер охлаждения подключён" if connected else
+                                      "Контроллер охлаждения не найден; приём профиля и температуры не подтверждён.")
         for w in (self.btn_apply, self.btn_service, self.chk_auto):
             w.setEnabled(inst)
         try:
