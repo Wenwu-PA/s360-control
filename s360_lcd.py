@@ -56,7 +56,7 @@ FEED_INTERVAL_S = 2.0
 
 DEFAULT_SETTINGS = {"fps": "15", "max_seconds": None, "scale": "fill", "focus_x": 0.5, "focus_y": 0.5,
                     "with_select": True, "cooling_mode": "balance", "background": "black", "rotate": 0,
-                    "device_direction": 0, "edge_trim": 0, "brightness": 100,
+                    "device_direction": 0, "edge_trim": 0, "brightness": 100, "lcd_enabled": True,
                     "last_file": None, "last_upload_time": None}
 
 
