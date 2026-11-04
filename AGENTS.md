@@ -5,11 +5,13 @@ S360 Control: Linux-приложение для MSI MEG CoreLiquid S360 (CachyOS
 - `s360_lcd.py` — ядро и CLI (протокол, ffmpeg, USB).
 - `s360_gui.py` — GUI.
 - `install.sh`, `uninstall.sh`, `packaging/` — установка.
-- `docs/design/` — макеты GUI (цель редизайна), `docs/PLAN.md` — план работ, `docs/OPEN_QUESTIONS.md` — что неизвестно.
+- `docs/design/` — макеты GUI (цель редизайна), `docs/PLAN.md` — план работ, `docs/OPEN_QUESTIONS.md` — что неизвестно,
+  `docs/PROTOCOL_VERIFIED.md` — что подтверждено захватами (источник истины для протокола).
 
 ## ЗАПРЕЩЕНО ТРОГАТЬ: протокол и запись на устройство
 В `s360_lcd.py`: `cmd_report`, `data_reports`, `build_upload_plan`, `build_select_plan`, `build_direction_plan`,
-`slot_for_direction`, `do_send`, `cooler_mode_reports`, `feed_report`, `find_hidraw`, `_write_reports`, `cooling_set`,
+`slot_for_direction`, `build_save_plan`, `build_brightness_plan`, `build_clock_plan`, `build_cooler_reports`,
+`validate_curves`, `load_curves`, `DEFAULT_CURVES`, `PUMP_MIN_DUTY`, `COOLING_MODE_IDS`, `CHANNELS`, `do_send`, `cooler_mode_reports`, `feed_report`, `find_hidraw`, `_write_reports`, `cooling_set`,
 `cooling_feed`, константы протокола (`VID`, `PID`, `SLOT_NAME`, `COOLING_MODES`, `REFERENCE_*`, `ENC`-параметры H.264).
 Менять только если задача в PLAN.md прямо этого требует. Байты не «улучшать», тайминги не менять, ретраи не добавлять.
 Новые команды устройства не добавлять. Если для функции нет данных протокола — оставить её недоступной (серый блок
