@@ -2,8 +2,9 @@
 """s360_lcd.py - ядро и CLI для MSI MEG CoreLiquid S360 под Linux.
 
 Что делает:
-  LCD  (0db0:9ba6): загрузка GIF/MP4 (проверено на железе); яркость, вкл/выкл, поворот экрана, режим «Часы» -
-                    по захватам MSI Center с ЭТОГО устройства (docs/PROTOCOL_VERIFIED.md), на железе из Linux ещё не пробовано.
+  LCD  (0db0:9ba6): загрузка GIF/MP4, яркость и вкл/выкл проверены владельцем на устройстве;
+                    поворот экрана и режим «Часы» — по захватам
+                    MSI Center с ЭТОГО устройства (docs/PROTOCOL_VERIFIED.md).
   Кулер(0db0:6a05): режимы Silent/Balance/Game/Customize и кастомные кривые - формат отчётов d0 40/41 сверен с
                     захватами MSI Center этого устройства; на железе из Linux ещё не пробовано. Режим держится
                     вместе с передачей температуры CPU (d0 85).
@@ -60,7 +61,8 @@ DEFAULT_SETTINGS = {"fps": "15", "max_seconds": None, "scale": "fill", "focus_x"
                     "last_file": None, "last_upload_time": None, "lcd_mode": "media"}
 
 
-# Проверено НА ЭТОМ экране (отправка и показ без зависаний): 20/3, 10 и 15 fps; анимация до ~2,5 с (37 кадров, 146 КБ).
+# Наблюдения воспроизведения отдельных файлов, не пределы прошивки: старые файлы до ~2,5 с,
+# а также отдельный GIF 60 FPS / 8,95 с (подтверждено владельцем).
 TESTED_RATES = (Fraction(20, 3), Fraction(10), Fraction(15))
 TESTED_MAX_SECONDS = 2.5
 
@@ -280,8 +282,10 @@ def probe_mp4(data: bytes):
 
 
 def beyond_tested(duration, rate) -> bool:
-    """True, если длительность или fps выходят за то, что проверено на экране."""
+    """Сравнение с наблюдавшимися параметрами; совместимость других файлов не гарантируется."""
     try:
+        if rate and Fraction(rate) == 60 and duration is not None and abs(duration - 8.95) < 0.01:
+            return False
         if rate and Fraction(rate) not in TESTED_RATES:
             return True
     except (ValueError, ZeroDivisionError):
@@ -563,7 +567,7 @@ def cooling_feed(mode_name=None, interval=FEED_INTERVAL_S, stop=lambda: False, l
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     enc = argparse.ArgumentParser(add_help=False)
-    enc.add_argument("--fps", help="фиксированный fps для GIF (проверено на экране: 20/3, 10, 15)")
+    enc.add_argument("--fps", help="фиксированный fps для GIF (наблюдались 20/3, 10, 15 и GIF 60 FPS / 8,95 с)")
     enc.add_argument("--max-seconds", type=float, help="обрезать до N секунд (эталон: 1.95)")
     enc.add_argument("--profile", choices=["baseline", "main", "high"], default="baseline",
                      help="профиль H.264 (по умолчанию baseline, как у эталона)")
@@ -653,7 +657,8 @@ def _dispatch(a):
     dur, frames, rate = probe_mp4(data)
     if dur is not None:
         print(f"длительность {dur:.2f} с, кадров {frames}, fps {rate}"
-              + ("  — ВЫШЕ проверенного (до 15 fps и ~2,5 с): возможно зависание" if beyond_tested(dur, rate) else "  — в проверенных пределах"))
+              + ("  — параметры не проверены на наших файлах; возможна несовместимость" if beyond_tested(dur, rate)
+                 else "  — параметры наблюдались; совместимость этого файла не гарантируется"))
     if a.cmd == "plan":
         print("dry-run: ничего не отправлено"); return
     if sh != REFERENCE_SHA256 and not a.allow_unverified_media:
@@ -756,6 +761,7 @@ def selftest():
     assert d90[:9] == b"\x01\x6b\x5a\x1a\x00\x04\x00\x00\x00" and d90[9:13] == (90).to_bytes(4, "little") and len(d90) == 64
     assert slot_for_direction(0) == SLOT_NAME == slot_for_direction(180) and slot_for_direction(270) == b"M1-S7-V-R1.mp4"
     assert not beyond_tested(2.47, "15/1") and not beyond_tested(1.95, "20/3") and beyond_tested(3.0, "15/1") and beyond_tested(1.0, "30/1")
+    assert not beyond_tested(8.95, "60/1") and beyond_tested(20, "60/1") and beyond_tested(8.95, "15/1")
     r1 = build_upload_plan(data, slot_for_direction(90))
     assert len(r1) == 229 and r1[0][1][13:27] == b"M1-S7-V-R1.mp4"
     assert math.ceil(REFERENCE_SIZE / 1023) == 226

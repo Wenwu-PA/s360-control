@@ -75,7 +75,7 @@ def main():
             installed = True
             page.refresh()
             assert page.btn_service.text() == "Запустить" and page.btn_service.isEnabled()
-            for mode in gui.COOLING_TITLES:
+            for mode in ("silent", "balance", "game"):
                 page.buttons[mode].click()
                 assert page.mode() == mode
                 assert sum(b.isChecked() for b in page.buttons.values()) == 1
@@ -84,7 +84,7 @@ def main():
             page.btn_apply.click()
             assert question.call_count == 2 and not calls and not core.COOLING_ENV.exists()
             question.return_value = QMessageBox.StandardButton.Yes
-            for mode in gui.COOLING_TITLES:
+            for mode in ("silent", "balance", "game"):
                 page.buttons[mode].click()
                 page.btn_apply.click()
                 assert calls[-1] == "restart" and core.COOLING_ENV.read_text() == f"MODE={mode}\n"
