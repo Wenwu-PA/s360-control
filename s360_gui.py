@@ -3,12 +3,14 @@
 
 Принцип: рабочие функции работают, остальное показано как НЕДОСТУПНОЕ с причиной (без муляжей управления).
   Работает (проверено на железе): загрузка GIF/MP4 на LCD.
-  Экспериментально (на этом устройстве не проверено): режимы кулера Silent/Balance/Game/Custom + передача температуры CPU.
+  Режимы кулера и свой профиль: работа и изменение оборотов подтверждены владельцем; обратного чтения нет.
   Поворот экрана: через публичный API ядра, 90°/270° экспериментальны.
   Яркость и вкл/выкл: через API ядра, с подтверждением записи во флеш.
   Часы: подтверждённый стиль 1, местное время перед отправкой, без автосинхронизации.
   Недоступно в GUI: другие режимы экрана, чтение RPM/температуры жидкости.
 """
+from copy import deepcopy
+from html import escape
 import datetime
 import json
 import re
@@ -17,10 +19,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QPixmap
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
-                               QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QPointF, QRectF
+from PySide6.QtGui import QColor, QPixmap, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import (QApplication, QBoxLayout, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
+                               QDialog, QDialogButtonBox, QGridLayout, QToolTip, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
                                QScrollArea, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
@@ -755,153 +757,304 @@ class LcdPage(QWidget):
                                                     if uncertain else ""))
 
 
+class CurveGraph(QWidget):
+    changed = Signal(int, int, int)
+
+    def __init__(self, channel):
+        super().__init__()
+        self.channel = channel
+        self.values = {"temp": [0] * 4, "duty": [0] * 4}
+        self.dragging = None
+        self.setMinimumSize(220, 200)
+
+    def plot_rect(self):
+        return QRectF(36, 16, self.width() - 52, self.height() - 48)
+
+    def point_position(self, index):
+        r = self.plot_rect()
+        return QPointF(r.left() + self.values["temp"][index] * r.width() / 100,
+                       r.bottom() - self.values["duty"][index] * r.height() / 100)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = self.plot_rect()
+        if self.channel == "pump":
+            y = r.bottom() - core.PUMP_MIN_DUTY * r.height() / 100
+            p.fillRect(QRectF(r.left(), y, r.width(), r.bottom() - y), QColor("#292c33"))
+            p.setPen(QColor("#9aa3b2"))
+            p.drawText(QPointF(r.left() + 5, y + 16), "ниже 60% нельзя")
+        for value in (0, 25, 50, 75, 100):
+            x = r.left() + value * r.width() / 100
+            y = r.bottom() - value * r.height() / 100
+            p.setPen(QColor("#30343b"))
+            p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+            p.setPen(QColor("#8b93a3"))
+            p.drawText(QPointF(x - 8, r.bottom() + 18), str(value))
+            if value in (0, 50, 100):
+                p.drawText(QPointF(4, y + 4), str(value))
+        p.drawText(QPointF(r.right() - 18, r.bottom() + 31), "°C")
+        p.drawText(QPointF(4, 12), "%")
+        p.setClipRect(r.adjusted(-6, -6, 6, 6))
+        p.setPen(QPen(QColor("#f06470"), 2.5))
+        points = [self.point_position(i) for i in range(4)]
+        p.drawPolyline(QPolygonF([QPointF(r.left(), points[0].y()), *points,
+                                 QPointF(r.right(), points[-1].y())]))
+        p.setBrush(QColor("#1a1d23"))
+        for point in points:
+            p.drawEllipse(point, 5, 5)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            distances = [(self.point_position(i) - event.position()).manhattanLength() for i in range(4)]
+            nearest = min(range(4), key=distances.__getitem__)
+            if distances[nearest] <= 18:
+                self.dragging = nearest
+
+    def mouseMoveEvent(self, event):
+        if self.dragging is None:
+            return
+        r = self.plot_rect()
+        temp = round(max(0, min(100, (event.position().x() - r.left()) * 100 / r.width())))
+        duty = round(max(0, min(100, (r.bottom() - event.position().y()) * 100 / r.height())))
+        # Не переставляем соседние точки и не исправляем помпу: проверяет только ядро.
+        self.changed.emit(self.dragging, temp, duty)
+        QToolTip.showText(event.globalPosition().toPoint(), f"{temp}° · {duty}%", self)
+
+    def mouseReleaseEvent(self, event):
+        self.dragging = None
+        QToolTip.hideText()
+
+
+class CurveCard(QGroupBox):
+    changed = Signal()
+
+    def __init__(self, channel, title, description):
+        super().__init__(title)
+        self.channel = channel
+        layout = QVBoxLayout(self)
+        layout.addWidget(muted(description))
+        self.graph = CurveGraph(channel)
+        layout.addWidget(self.graph)
+        self.chips_widget = QWidget()
+        chips = QGridLayout(self.chips_widget)
+        chips.setContentsMargins(0, 0, 0, 0)
+        self.chips = []
+        for index in range(4):
+            button = QPushButton()
+            button.setStyleSheet("padding: 7px 5px;")
+            button.clicked.connect(lambda checked=False, i=index: self.edit_point(i))
+            chips.addWidget(button, index // 2, index % 2)
+            self.chips.append(button)
+        layout.addWidget(self.chips_widget)
+        self.placeholder = muted("Кривую задаёт сама водянка — программа её не видит")
+        self.placeholder.setMinimumHeight(200)
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.placeholder)
+        self.graph.changed.connect(self.move_point)
+
+    def set_values(self, values):
+        self.graph.values = deepcopy(values)
+        for i, chip in enumerate(self.chips):
+            chip.setText(f'{values["temp"][i]}° · {values["duty"][i]}%')
+        self.graph.update()
+
+    def move_point(self, index, temp, duty):
+        values = deepcopy(self.graph.values)
+        values["temp"][index], values["duty"][index] = temp, duty
+        self.set_values(values)
+        self.changed.emit()
+
+    def edit_point(self, index):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Изменить точку")
+        form = QFormLayout(dialog)
+        inputs = {}
+        for key, title in (("temp", "Температура, °C"), ("duty", "Обороты, %")):
+            spin = QSpinBox()
+            spin.setRange(-100000, 100000)
+            spin.setValue(self.graph.values[key][index])
+            form.addRow(title, spin)
+            inputs[key] = spin
+        buttons = QDialogButtonBox()
+        buttons.addButton("Готово", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton("Отмена", QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.move_point(index, inputs["temp"].value(), inputs["duty"].value())
+
+    def set_custom(self, custom):
+        self.graph.setVisible(custom)
+        self.chips_widget.setVisible(custom)
+        self.placeholder.setVisible(not custom)
+
+
 class CoolingPage(QWidget):
     def __init__(self, settings):
         super().__init__()
         self.s = settings
+        self.service_error = ""
+        self.profile_error = ""
         page = QVBoxLayout(self)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        content = QWidget()
-        scroll.setWidget(content)
+        self.content = QWidget()
+        scroll.setWidget(self.content)
         page.addWidget(scroll)
-        lay = QVBoxLayout(content)
-        lay.addWidget(QLabel("Управление охлаждением"))
-        warn = QLabel("Экспериментальная функция. Формат команд сверен с захватами MSI Center этого устройства; "
-                      "работа охлаждения из Linux ещё не проверена. Режим работает вместе с "
-                      "передачей температуры CPU (сервис). Если сервис остановить, поведение помпы и вентиляторов без неё "
-                      "не проверено — следи за температурой.")
-        warn.setObjectName("warn")
-        warn.setWordWrap(True)
-        lay.addWidget(warn)
-        row = QHBoxLayout()
+        lay = QVBoxLayout(self.content)
+        lay.addWidget(QLabel("Охлаждение"))
+        self.mode_row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.group = QButtonGroup(self)
-        self.group.setExclusive(True)
         self.buttons = {}
-        for key, description in (("silent", "Минимум шума"), ("balance", "Повседневная работа"),
-                                 ("game", "Приоритет охлаждения"), ("custom", "Свои кривые · 5 каналов")):
-            b = QPushButton(f"{COOLING_TITLES[key]}\n\n{description}")
+        for key, description in (("silent", "Тише всего"), ("balance", "На каждый день"),
+                                 ("game", "Максимум охлаждения"), ("custom", "Настрой сам")):
+            b = QPushButton(f"{COOLING_TITLES[key]}\n{description}")
             b.setProperty("coolingCard", True)
             b.setCheckable(True)
             self.group.addButton(b)
             self.buttons[key] = b
-            row.addWidget(b, 1)
+            self.mode_row.addWidget(b, 1)
         self.buttons.get(self.s["cooling_mode"], self.buttons["balance"]).setChecked(True)
-        lay.addLayout(row)
-
-        self.curves_box = QGroupBox("Свой профиль · локальный редактор")
-        editor = QVBoxLayout(self.curves_box)
-        editor.addWidget(muted("4 точки на канал: температуры строго растут, обороты не падают. "
-                               "Помпа — не ниже 60%. Проверка выполняется ядром при сохранении и применении."))
-        tabs = QTabWidget()
-        self.curve_inputs = {}
-        titles = ("Радиатор 1", "Радиатор 2", "Радиатор 3", "Водоблок", "Помпа")
-        for channel, title in zip(core.CHANNELS, titles):
-            tab = QWidget()
-            form = QFormLayout(tab)
-            self.curve_inputs[channel] = {"temp": [], "duty": []}
-            for point in range(4):
-                row = QHBoxLayout()
-                for key, suffix in (("temp", " °C"), ("duty", " %")):
-                    spin = QSpinBox()
-                    spin.setRange(0, 100)
-                    spin.setSuffix(suffix)
-                    self.curve_inputs[channel][key].append(spin)
-                    spin.valueChanged.connect(lambda: self.curves_status.setText(
-                        "Есть локальные изменения; они не сохранены и не применены."))
-                    row.addWidget(spin)
-                form.addRow(f"Точка {point + 1}", row)
-            tabs.addTab(tab, title)
-        editor.addWidget(tabs)
-        self.curves_status = muted("")
-        editor.addWidget(self.curves_status)
-        actions = QHBoxLayout()
-        self.btn_save_curves = QPushButton("Сохранить профиль")
-        self.btn_reset_curves = QPushButton("Сбросить к стандартным")
-        actions.addWidget(self.btn_save_curves)
-        actions.addWidget(self.btn_reset_curves)
-        editor.addLayout(actions)
-        editor.addWidget(muted("Сохранение и сброс меняют только локальные данные. Для отправки выбери "
-                               "«Свой профиль» и нажми «Применить режим» или «Запустить»."))
+        lay.addLayout(self.mode_row)
+        self.hint = muted("")
+        lay.addWidget(self.hint)
+        self.curves_box = QWidget()
+        self.cards_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, self.curves_box)
+        self.cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.cards = {}
+        for channel, title, description in (
+                ("radiator1", "Вентилятор радиатора", "Все три вентилятора вместе"),
+                ("waterblock", "Вентилятор водоблока", "Маленький вентилятор на помпе"),
+                ("pump", "Помпа", "Минимум 60% — защита процессора")):
+            card = CurveCard(channel, title, description)
+            self.cards[channel] = card
+            self.cards_layout.addWidget(card, 1)
+            card.changed.connect(self.update_dirty)
         lay.addWidget(self.curves_box)
-        self.btn_save_curves.clicked.connect(self.save_curves)
-        self.btn_reset_curves.clicked.connect(self.reset_curves)
-        for button in self.buttons.values():
-            button.toggled.connect(lambda: self.curves_box.setVisible(self.mode() == "custom"))
-        self.curves_box.setVisible(self.mode() == "custom")
+        self.curves_status = muted("")
+        lay.addWidget(self.curves_status)
         try:
             curves = core.load_curves() if core.CURVES_FILE.exists() else core.DEFAULT_CURVES
             self.set_curves(curves)
-            self.curves_status.setText("Локальный профиль загружен; это не чтение настроек устройства.")
+            self.curves_status.setText("Локальный профиль. Изменения применяются только по кнопке.")
         except (core.S360Error, OSError, AttributeError, TypeError) as e:
+            self.profile_error = str(e)
             self.set_curves(core.DEFAULT_CURVES)
-            self.curves_status.setText(f"Не удалось загрузить профиль: {e}. Показаны стандартные точки; "
-                                       "исходный файл не изменён.")
+            self.curves_status.setText("Не удалось загрузить профиль. Исправь файл и открой вкладку заново. "
+                                       "Показан образец; исходный файл не изменён.")
+        self.saved_curves = deepcopy(self.curves)
+        self.saved_mode = self.mode()
         self.cooler_connection = muted("")
         lay.addWidget(self.cooler_connection)
-
-        box = QGroupBox("Передача температуры CPU")
-        bl = QVBoxLayout(box)
-        bl.addWidget(muted(f"Нужна для работы режима · обновление каждые {core.FEED_INTERVAL_S:g} с"))
-        service_row = QHBoxLayout()
         self.status = QLabel()
-        self.status.setTextFormat(Qt.TextFormat.RichText)
         self.status.setWordWrap(True)
-        service_row.addWidget(self.status, 1)
-        self.btn_service = QPushButton("Запустить")
-        service_row.addWidget(self.btn_service)
-        bl.addLayout(service_row)
-        self.chk_auto = QCheckBox("Запускать сервис при входе в систему")
-        bl.addWidget(self.chk_auto)
-        lay.addWidget(box)
-        self.last_mode = muted("")
-        lay.addWidget(self.last_mode)
-
-        bottom = QHBoxLayout()
-        data = QGroupBox("Данные охлаждения")
-        dl = QVBoxLayout(data)
-        values = QHBoxLayout()
-        for text in ("Помпа — RPM", "Радиатор — RPM", "Жидкость — °C"):
-            values.addWidget(muted(text))
-        dl.addLayout(values)
-        dl.addWidget(muted("Чтение датчиков устройства ещё не реализовано"))
-        bottom.addWidget(data, 1)
-        self.btn_apply = QPushButton("Применить режим")
+        lay.addWidget(self.status)
+        lay.addWidget(muted("Статус относится к сервису. Приём профиля и температуры водянкой не подтверждён."))
+        self.dirty = muted("")
+        lay.addWidget(self.dirty)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        self.btn_save_curves = QPushButton("Сохранить")
+        self.btn_apply = QPushButton("Применить")
         self.btn_apply.setObjectName("primary")
-        bottom.addWidget(self.btn_apply, 0, Qt.AlignmentFlag.AlignBottom)
-        lay.addLayout(bottom)
-        lay.addStretch()
+        actions.addWidget(self.btn_save_curves)
+        actions.addWidget(self.btn_apply)
+        lay.addLayout(actions)
+        self.btn_details = QToolButton()
+        self.btn_details.setText("Подробности")
+        self.btn_details.setCheckable(True)
+        self.btn_details.setArrowType(Qt.ArrowType.RightArrow)
+        lay.addWidget(self.btn_details)
+        self.details = QWidget()
+        dl = QVBoxLayout(self.details)
+        dl.addWidget(muted(f"Сервис {UNIT}: режим d0 40/41, температура CPU d0 85 "
+                           f"каждые {core.FEED_INTERVAL_S:g} с. Доступ через hidraw.\n"
+                           f"Профиль: {core.CURVES_FILE}\nРежим: {core.COOLING_ENV}\n"
+                           "Если установленная копия устарела, обнови её через ./install.sh вручную."))
+        self.last_mode = muted("")
+        dl.addWidget(self.last_mode)
+        self.btn_service = QPushButton("Остановить передачу температуры")
+        dl.addWidget(self.btn_service)
+        self.chk_auto = QCheckBox("Запускать при входе в систему")
+        dl.addWidget(self.chk_auto)
+        self.btn_reset_curves = QPushButton("Сбросить видимые точки к образцу")
+        dl.addWidget(self.btn_reset_curves)
+        dl.addWidget(muted("RPM и температура жидкости недоступны: чтение не реализовано.\n"
+                           "Поведение после остановки передачи температуры не проверено владельцем."))
+        lay.addWidget(self.details)
+        self.details.hide()
+        self.btn_details.toggled.connect(self.show_details)
+        self.btn_save_curves.clicked.connect(self.save_curves)
+        self.btn_reset_curves.clicked.connect(self.reset_curves)
         self.btn_apply.clicked.connect(self.apply)
-        self.btn_service.clicked.connect(self.toggle_service)
+        self.btn_service.clicked.connect(self.stop)
         self.chk_auto.clicked.connect(self.autostart)
+        for button in self.buttons.values():
+            button.toggled.connect(self.mode_changed)
+        lay.addStretch()
+        self.mode_changed()
         self.refresh()
 
-    def mode(self):
-        for key, b in self.buttons.items():
-            if b.isChecked():
-                return key
-        return "balance"
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        narrow = self.width() < 960
+        direction = QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
+        self.cards_layout.setDirection(direction)
+        self.mode_row.setDirection(QBoxLayout.Direction.TopToBottom if self.width() < 700
+                                   else QBoxLayout.Direction.LeftToRight)
 
-    def apply(self):
-        self.start_service("restart")
+    def show_details(self, checked):
+        self.details.setVisible(checked)
+        self.btn_details.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+
+    def mode(self):
+        return next((key for key, b in self.buttons.items() if b.isChecked()), "balance")
+
+    def mode_changed(self):
+        custom = self.mode() == "custom"
+        for card in self.cards.values():
+            card.set_custom(custom)
+        self.hint.setText("Тяни точки на графике или нажми на значение под ним и введи число."
+                          if custom else "Готовый режим производителя. Для изменения выбери «Свой профиль».")
+        self.btn_reset_curves.setEnabled(custom)
+        self.curves_status.setVisible(custom)
+        self.update_dirty()
+
+    def update_dirty(self):
+        changed = self.mode() != self.saved_mode or self.raw_curves() != self.saved_curves
+        self.dirty.setText("Изменения не сохранены" if changed else "Сохранено локально")
 
     def set_curves(self, curves):
-        for channel in core.CHANNELS:
-            for key in ("temp", "duty"):
-                for spin, value in zip(self.curve_inputs[channel][key], curves[channel][key]):
-                    spin.setValue(value)
+        self.curves = deepcopy(curves)
+        for channel, card in self.cards.items():
+            card.set_values(curves[channel])
 
     def reset_curves(self):
-        self.set_curves(core.DEFAULT_CURVES)
-        self.curves_status.setText("Стандартные точки восстановлены в редакторе; не сохранены и не применены.")
+        for channel, card in self.cards.items():
+            card.set_values(core.DEFAULT_CURVES[channel])
+        self.update_dirty()
+
+    def raw_curves(self):
+        curves = deepcopy(self.curves)
+        for channel, card in self.cards.items():
+            curves[channel] = deepcopy(card.graph.values)
+        return curves
 
     def editor_curves(self):
-        return core.validate_curves({channel: {key: [spin.value() for spin in spins]
-                                              for key, spins in values.items()}
-                                     for channel, values in self.curve_inputs.items()})
+        try:
+            return core.validate_curves(self.raw_curves())
+        except core.S360Error as e:
+            text = str(e)
+            for channel, title in (("radiator1", "Вентилятор радиатора"), ("waterblock", "Вентилятор водоблока"),
+                                   ("pump", "Помпа"), ("radiator2", "Служебный канал"),
+                                   ("radiator3", "Служебный канал")):
+                text = text.replace(channel, title)
+            raise core.S360Error(text) from e
 
     def write_curves(self, curves):
-        # Атомарная замена: ошибка записи не должна оставлять обрезанный JSON для сервиса.
         core.CURVES_FILE.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(mode="w", dir=core.CURVES_FILE.parent,
                                          prefix=".curves-", suffix=".json", delete=False) as f:
@@ -912,15 +1065,29 @@ class CoolingPage(QWidget):
                 temporary.replace(core.CURVES_FILE)
             finally:
                 temporary.unlink(missing_ok=True)
-        self.curves_status.setText("Профиль сохранён локально; приём устройством не подтверждён. "
-                                   "Для применения нужен запуск или перезапуск сервиса.")
+        self.saved_curves = deepcopy(curves)
+
+    def save_local(self):
+        if self.mode() == "custom":
+            if self.profile_error:
+                raise core.S360Error("Файл профиля повреждён. Исправь его и открой приложение заново: "
+                                     "служебные каналы нельзя заменять образцом.")
+            self.write_curves(self.editor_curves())
+        self.s["cooling_mode"] = self.mode()
+        core.save_settings(self.s)
+        self.saved_mode = self.mode()
+        self.update_dirty()
 
     def save_curves(self):
         try:
-            self.write_curves(self.editor_curves())
+            self.save_local()
+            self.curves_status.setText("Сохранено локально. Для отправки нажми «Применить».")
         except (core.S360Error, OSError) as e:
             self.curves_status.setText(f"Профиль не сохранён: {e}")
             QMessageBox.warning(self, "Профиль не сохранён", str(e))
+
+    def apply(self):
+        self.start_service("restart")
 
     def start_service(self, command):
         if not unit_installed():
@@ -928,58 +1095,56 @@ class CoolingPage(QWidget):
             return
         mode = self.mode()
         try:
-            curves = self.editor_curves() if mode == "custom" else None
-        except core.S360Error as e:
+            if mode == "custom":
+                if self.profile_error:
+                    raise core.S360Error("Файл профиля повреждён. Исправь его и открой приложение заново.")
+                if not core.CURVES_FILE.exists():
+                    raise core.S360Error("Профиль ещё не сохранён. Нажми «Сохранить», затем «Применить».")
+                # Существующий файл тоже должен быть пригоден для сервиса; не затираем повреждение.
+                core.load_curves()
+                curves = self.editor_curves()
+        except (core.S360Error, OSError, AttributeError, TypeError) as e:
             QMessageBox.warning(self, "Некорректный профиль", str(e))
             return
-        r = QMessageBox.question(
-            self, "Подтверждение (эксперимент)",
-            f"Сервис будет {'перезапущен' if command == 'restart' else 'запущен'} с выбранным режимом "
-            f"«{COOLING_TITLES[mode]}» (d0 40 + d0 41), затем каждые "
-            f"{core.FEED_INTERVAL_S:g} с будет слать температуру CPU (d0 85).\nРабота из Linux ещё не проверена. "
-            f"Следи за температурой. Продолжить?",
+        answer = QMessageBox.question(self, "Применить охлаждение",
+            f"Применить «{COOLING_TITLES[mode]}» и запустить передачу температуры процессора?\n"
+            "Работа режимов подтверждена владельцем; обратного чтения настроек нет.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        if r != QMessageBox.StandardButton.Yes:
+        if answer != QMessageBox.StandardButton.Yes:
             return
-        if mode == "custom" and not core.usb_present(core.COOLER_VID, core.COOLER_PID):
-            QMessageBox.warning(self, "Устройство не найдено", "Контроллер охлаждения отключён. Профиль не применён.")
+        if not core.usb_present(core.COOLER_VID, core.COOLER_PID):
+            QMessageBox.warning(self, "Устройство не найдено", "Контроллер охлаждения отключён. Режим не применён.")
             self.refresh()
             return
         try:
-            if curves is not None:
+            if mode == "custom":
                 self.write_curves(curves)
             core.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             core.COOLING_ENV.write_text(f"MODE={mode}\n")
         except OSError as e:
             QMessageBox.warning(self, "Ошибка", str(e))
             return
+        self.service_error = ""
+        self.status.setText("Запускается передача температуры процессора…")
         code, out = systemctl(command, UNIT)
         if code != 0:
-            QMessageBox.warning(self, "Сервис не запущен", out or "systemctl вернул ошибку")
+            self.service_error = out or "Не удалось запустить сервис"
+            QMessageBox.warning(self, "Сервис не запущен", self.service_error)
         self.s["cooling_mode"] = mode
         try:
             core.save_settings(self.s)
+            self.saved_mode = mode
+            self.update_dirty()
         except OSError as e:
             QMessageBox.warning(self, "Настройки не сохранены", str(e))
         self.refresh()
 
-    def toggle_service(self):
-        if not unit_installed():
-            self.refresh()
-            return
-        code, state = systemctl("is-active", UNIT)
-        if code == 0 and state == "active":
-            self.stop()
-        elif state in ("inactive", "failed"):
-            self.start_service("start")
-        else:
-            QMessageBox.warning(self, "Статус сервиса неизвестен", state or "systemctl вернул ошибку")
-            self.refresh()
-
     def stop(self):
         code, out = systemctl("stop", UNIT)
         if code != 0:
-            QMessageBox.warning(self, "Сервис не остановлен", out or "systemctl вернул ошибку")
+            QMessageBox.warning(self, "Сервис не остановлен", out or "Не удалось остановить")
+        else:
+            self.service_error = ""
         self.refresh()
 
     def autostart(self, checked):
@@ -988,37 +1153,57 @@ class CoolingPage(QWidget):
             QMessageBox.warning(self, "Ошибка", out)
         self.refresh()
 
+    def journal_line(self):
+        try:
+            result = subprocess.run(["journalctl", "--user", "-u", UNIT, "-n", "1", "--no-pager"],
+                                    capture_output=True, text=True, timeout=10)
+            return (result.stdout.strip() or result.stderr.strip() or "В журнале нет записей").splitlines()[-1]
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"Журнал недоступен: {e}"
+
     def refresh(self):
         inst = unit_installed()
         connected = core.usb_present(core.COOLER_VID, core.COOLER_PID)
-        self.cooler_connection.setText("Контроллер охлаждения подключён" if connected else
-                                      "Контроллер охлаждения не найден; приём профиля и температуры не подтверждён.")
-        for w in (self.btn_apply, self.btn_service, self.chk_auto):
-            w.setEnabled(inst)
+        self.cooler_connection.setText("Контроллер охлаждения подключён" if connected else "Контроллер охлаждения не найден")
+        self.btn_apply.setEnabled(inst)
+        self.btn_apply.setToolTip("" if inst else "Сервис не установлен: выполни ./install.sh вручную")
+        self.chk_auto.setEnabled(inst)
+        self.btn_service.setEnabled(False)
         try:
-            last = COOLING_TITLES.get(__import__("json").loads(core.COOLING_STATE.read_text())["mode"], "неизвестный")
+            last = COOLING_TITLES.get(json.loads(core.COOLING_STATE.read_text())["mode"], "неизвестный")
         except (OSError, ValueError, KeyError, TypeError):
             last = "нет данных"
         self.last_mode.setText(f"Последний отправленный режим: {last}. Обратного чтения с устройства нет.")
-        self.status.setToolTip("")
-        self.btn_service.setText("Запустить")
         if not inst:
-            self.status.setText(badge("сервис не установлен — запусти install.sh", WARN))
+            self.status.setText("Сервис не установлен — выполни ./install.sh вручную")
             self.chk_auto.setChecked(False)
             return
         code, state = systemctl("is-active", UNIT)
-        active = code == 0 and state == "active"
-        enabled = systemctl("is-enabled", UNIT)[1] == "enabled"
-        self.chk_auto.setChecked(enabled)
-        if active:
-            self.status.setText(badge("Сервис работает; приём температуры устройством не подтверждён", OK))
-            self.btn_service.setText("Остановить")
-        elif state in ("inactive", "failed"):
-            self.status.setText(badge("Сервис остановлен" if state == "inactive" else "Ошибка сервиса", WARN))
+        # Restart=on-failure может скрыть падение за состоянием activating (auto-restart).
+        restart_error = False
+        if state == "activating":
+            _, properties = systemctl("show", "--property=SubState,Result", UNIT)
+            properties = dict(line.split("=", 1) for line in properties.splitlines() if "=" in line)
+            restart_error = (properties.get("SubState") == "auto-restart"
+                             and properties.get("Result") not in (None, "success"))
+        self.status.setToolTip("")
+        self.chk_auto.setChecked(systemctl("is-enabled", UNIT)[1] == "enabled")
+        if state not in ("active", "inactive", "failed", "activating", "reloading", "deactivating"):
+            self.status.setText(badge("Статус сервиса неизвестен", WARN))
+            self.status.setToolTip(state)
+        elif state == "failed" or restart_error or self.service_error:
+            self.status.setText(badge("Ошибка сервиса: " + escape(self.service_error or "Передача температуры остановлена")
+                                      + "<br>" + escape(self.journal_line()), BAD))
+        elif code == 0 and state == "active":
+            self.status.setText(badge("Сервис передачи температуры процессора работает; приём не подтверждён", OK))
+            self.btn_service.setEnabled(True)
+        elif state in ("activating", "reloading"):
+            self.status.setText(badge("Запускается передача температуры процессора…", WARN))
+        elif state in ("inactive", "deactivating"):
+            self.status.setText(badge("Передача температуры процессора остановлена — охлаждение без неё не проверено", WARN))
         else:
             self.status.setText(badge("Статус сервиса неизвестен", WARN))
             self.status.setToolTip(state)
-            self.btn_service.setEnabled(False)
 
 
 class MonitoringPage(QWidget):

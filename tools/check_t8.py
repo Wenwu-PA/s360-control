@@ -52,6 +52,7 @@ def main():
               patch.object(core, "find_hidraw", side_effect=forbidden),
               patch.object(core, "_write_reports", side_effect=forbidden),
               patch.object(gui.subprocess, "run", side_effect=forbidden),
+              patch.object(gui.CoolingPage, "journal_line", return_value="Ошибка из журнала"),
               patch.dict(sys.modules, {"usb.core": None, "usb.util": None}),
               patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question,
               patch.object(QMessageBox, "warning") as warning,
@@ -64,25 +65,31 @@ def main():
             page.buttons["custom"].click()
             assert not page.curves_box.isHidden()
             assert page.editor_curves() == core.DEFAULT_CURVES
-            assert len(page.curve_inputs) == 5
-            assert all(len(spins) == 4 for values in page.curve_inputs.values() for spins in values.values())
+            assert len(page.cards) == 3
+            assert all(len(card.chips) == 4 for card in page.cards.values())
             assert not core.CURVES_FILE.exists() and not calls
-            page.btn_apply.click()  # Отмена ничего не сохраняет.
-            assert question.called and not core.CURVES_FILE.exists() and not core.COOLING_ENV.exists()
-            page.curve_inputs["pump"]["duty"][0].setValue(59)
+            page.btn_apply.click()  # Нет файла — нет запуска.
+            assert not question.called and not calls
             page.btn_save_curves.click()
-            assert "60%" in warning.call_args.args[2] and not core.CURVES_FILE.exists()
+            original = core.CURVES_FILE.read_text()
+            page.btn_apply.click()  # Отмена ничего не применяет.
+            assert question.called and not core.COOLING_ENV.exists()
+            page.cards["pump"].move_point(0, 59, 59)
+            page.btn_save_curves.click()
+            assert "60%" in warning.call_args.args[2] and core.CURVES_FILE.read_text() == original
             question.return_value = QMessageBox.StandardButton.Yes
             page.btn_apply.click()
             assert warning.call_args.args[1] == "Некорректный профиль" and not calls
             page.btn_reset_curves.click()
             for channel, key, index, value in (("radiator1", "temp", 1, 48),
-                                               ("radiator2", "duty", 1, 1)):
-                page.curve_inputs[channel][key][index].setValue(value)
+                                               ("radiator1", "duty", 1, 1)):
+                values = page.cards[channel].graph.values
+                page.cards[channel].move_point(index, value if key == "temp" else values["temp"][index],
+                                                value if key == "duty" else values["duty"][index])
                 page.btn_save_curves.click()
-                assert not core.CURVES_FILE.exists()
+                assert core.CURVES_FILE.read_text() == original
                 page.btn_reset_curves.click()
-            page.curve_inputs["pump"]["duty"][1].setValue(72)
+            page.cards["pump"].move_point(1, 68, 72)
             page.btn_save_curves.click()
             saved = core.CURVES_FILE.read_text()
             assert core.load_curves()["pump"]["duty"] == [60, 72, 89, 100]
@@ -93,15 +100,15 @@ def main():
             page.btn_reset_curves.click()
             assert page.editor_curves() == core.DEFAULT_CURVES
             assert core.CURVES_FILE.read_text() == saved  # Сброс пока только в редакторе.
-            page.curve_inputs["radiator1"]["temp"][0].setValue(47)
+            page.cards["radiator1"].move_point(0, 47, 21)
             page.btn_apply.click()
             assert calls == ["restart"] and core.load_curves() == page.editor_curves()
             assert core.load_curves()["radiator1"]["temp"][0] == 47
             assert core.load_settings()["cooling_mode"] == "custom"
             assert "не подтверждён" in page.status.text()
             page.btn_service.click()
-            page.btn_service.click()
-            assert calls[-2:] == ["stop", "start"]
+            page.btn_apply.click()
+            assert calls[-2:] == ["stop", "restart"]
             restored = gui.CoolingPage(core.load_settings())
             assert restored.mode() == "custom" and not restored.curves_box.isHidden()
             restored.close()
@@ -146,7 +153,7 @@ def main():
             window.close()
             app.processEvents()
             assert not window.isVisible()
-        print("T8 ok: Qt, 5×4 точки, валидация ядра, JSON, сброс, custom-сервис, ошибки, USB отключён; отправок нет")
+        print("T8 ok: Qt, 3×4 точки, валидация ядра, JSON, сброс, custom-сервис, ошибки, USB отключён; отправок нет")
 
 
 if __name__ == "__main__":
