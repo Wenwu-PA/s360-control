@@ -104,7 +104,6 @@ def main():
             for value in (37, 0, 100):
                 page.sld_brightness.setValue(value)
                 release.clear()
-                page.chk_detach.setChecked(True)
                 page.btn_brightness.click()
                 assert page.worker.kind == "brightness"
                 assert not page.panel.isEnabled() and not page.brightness_panel.isEnabled()

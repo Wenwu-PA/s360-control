@@ -69,6 +69,17 @@ QSlider::groove:horizontal {{ background: {c['border']}; height: 4px; }}
 QSlider::sub-page:horizontal {{ background: {c['line']}; }}
 QSlider::handle:horizontal {{ background: {c['text']}; width: 12px; margin: -4px 0; border-radius: 6px; }}
 QSlider::handle:horizontal:disabled {{ background: {c['disabled']}; }}
+QPushButton[lcdMode="true"] {{ text-align: left; border-radius: {medium}px; padding: 12px {space}px; }}
+QPushButton[lcdLink="true"] {{ background: transparent; border: none; color: {c['secondary']}; padding: {gap}px 0; }}
+QGroupBox[lcdCard="true"] {{ margin-top: 0; padding: {space}px; }}
+QGroupBox[lcdCard="true"]::title {{ subcontrol-origin: padding; color: {c['text']}; font-size: {FONT_SIZES['title']}px; }}
+QGroupBox#lcdTile {{ background: {c['control']}; margin-top: 0; padding: {gap}px; }}
+QLineEdit#tileValue, QDoubleSpinBox#tileValue {{ font-size: {FONT_SIZES['heading']}px; font-weight: 600; background: transparent; border: none; padding: 0; }}
+QLabel[lcdCaption="true"] {{ font-size: {FONT_SIZES['caption']}px; }}
+QLabel#lcdTitle {{ font-size: {FONT_SIZES['title']}px; font-weight: 600; }}
+QLabel#clockTime {{ font-size: {FONT_SIZES['heading']}px; font-weight: 600; }}
+QLabel#clockStyle {{ background: {c['control']}; border: 1px solid {c['accent']}; border-radius: {medium}px; padding: 12px 18px; }}
+QLabel#clockPreview {{ background: {c['background']}; font-size: 72px; font-weight: 600; border-radius: {medium}px; }}
 QLabel#preview {{ background: {c['background']}; border: 1px solid {c['border']}; border-radius: {medium}px; }}
 QLabel#warn {{ background: {c['surface']}; color: {c['warning']}; border: 1px solid {c['border']}; border-radius: {medium}px; padding: {gap}px; }}
 QToolTip {{ background: {c['control']}; color: {c['text']}; border: 1px solid {c['border']}; }}

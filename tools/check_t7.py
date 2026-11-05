@@ -88,9 +88,9 @@ def main():
             assert page.s["lcd_mode"] == "media" and page.clock_panel.isHidden()
             page.mode_buttons["clock"].click()
             assert page.mode_buttons["clock"].isChecked() and not page.clock_panel.isHidden()
-            assert page.panel.isHidden() and page.preview_box.isHidden()
-            assert "№1" in page.clock_panel.title()
-            assert "Местное время" in page.lbl_clock_time.text()
+            assert page.panel.isHidden() and not page.preview_box.isHidden()
+            assert page.clock_panel.title() == "Часы"
+            assert "из системы · UTC" in page.lbl_clock_time.text()
             assert core.load_settings()["lcd_mode"] == "clock"
             restored = gui.LcdPage(core.load_settings())
             assert restored.mode_buttons["clock"].isChecked()
@@ -120,8 +120,6 @@ def main():
                     Clock.current = real_datetime(2026, 11, 5, 4, 5, 6, tzinfo=tz)
                     return QMessageBox.StandardButton.Yes
                 question.side_effect = approve
-                page.chk_clock_detach.setChecked(True)
-                assert page.chk_detach.isChecked()
                 release.clear()
                 page.btn_clock.click()
                 assert page.worker.kind == "clock"
@@ -146,7 +144,7 @@ def main():
                 assert "Приём LCD не подтверждён" in page.lbl_clock_status.text()
                 assert local.strftime("%d.%m.%Y %H:%M:%S %z") in page.lbl_clock_status.text()
                 assert page.pending_clock is None and page.prog.value() == 2
-                assert page.mode_buttons["media"].isEnabled() and not page.mode_buttons["monitor"].isEnabled()
+                assert page.mode_buttons["media"].isEnabled() and "monitor" not in page.mode_buttons
             question.side_effect = None
             assert len(calls) == 2  # параллельные действия не запустились
             for error in (core.S360Error("нет доступа к USB"), core.S360Error("LCD не найден"),
