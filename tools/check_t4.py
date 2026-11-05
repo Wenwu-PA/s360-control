@@ -19,6 +19,8 @@ def main():
         from PySide6.QtCore import QTimer
         from PySide6.QtWidgets import QApplication, QMessageBox
         import s360_gui as gui
+        # Проверки прежних экранов: состояние подключения изолировано от хоста.
+        patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
 
         installed, state, enabled = False, "inactive", False
@@ -50,6 +52,7 @@ def main():
             raise AssertionError("Попытка обращения к оборудованию или реальному сервису")
 
         app = QApplication([])
+        app.setFont(gui.theme.application_font())
         app.setStyleSheet(gui.STYLE)
         with (patch.object(gui, "systemctl", side_effect=service),
               patch.object(gui, "unit_installed", side_effect=lambda: installed),

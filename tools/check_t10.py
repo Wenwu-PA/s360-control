@@ -16,8 +16,10 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from PySide6.QtCore import QPointF, Qt
         from PySide6.QtGui import QMouseEvent
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QSpinBox
         import s360_gui as gui
+        # Проверки прежних экранов: состояние подключения изолировано от хоста.
+        patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
         state, calls, errors = 'inactive', [], []
 
@@ -39,6 +41,7 @@ def main():
             return 0, ''
 
         app = QApplication([])
+        app.setFont(gui.theme.application_font())
         app.setStyleSheet(gui.STYLE)
         with (patch.object(gui, 'systemctl', side_effect=service),
               patch.object(gui, 'unit_installed', return_value=True),
@@ -83,10 +86,27 @@ def main():
             page.save_curves()
             saved = core.load_curves()
             assert all(saved[ch] == curves[ch] for ch in ('radiator2', 'radiator3')) and not calls  # 5
-            page.cards['pump'].move_point(0, 59, 59)
-            page.apply()
-            assert not calls and '60%' in warning.call_args.args[2]
-            assert page.cards['pump'].graph.values['duty'][0] == 59  # 6: ошибка не меняет введённое
+            pump = page.cards['pump']
+            graph = pump.graph
+            start = graph.point_position(0)
+            target = QPointF(start.x(), graph.plot_rect().bottom())
+            warning.reset_mock()
+            for kind, pos, button, buttons in (
+                (QMouseEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton),
+                (QMouseEvent.Type.MouseMove, target, Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton),
+                (QMouseEvent.Type.MouseButtonRelease, target, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)):
+                app.sendEvent(graph, QMouseEvent(kind, pos, graph.mapToGlobal(pos.toPoint()), button, buttons,
+                                                Qt.KeyboardModifier.NoModifier))
+            assert graph.values['duty'][0] == 60 and not warning.called
+
+            def enter_low_duty(dialog):
+                dialog.findChildren(QSpinBox)[1].setValue(59)
+                assert any('60%' in label.text() for label in dialog.findChildren(gui.QLabel))
+                return QDialog.DialogCode.Accepted
+
+            with patch.object(QDialog, 'exec', enter_low_duty):
+                pump.edit_point(0)
+            assert graph.values['duty'][0] == 60 and not warning.called and not calls  # 6: зажим обоих способов
             page.reset_curves()
             assert all(page.raw_curves()[ch] == curves[ch] for ch in ('radiator2', 'radiator3'))
             page.apply()

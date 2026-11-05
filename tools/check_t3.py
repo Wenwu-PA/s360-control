@@ -124,9 +124,12 @@ def main():
         from PySide6.QtGui import QColor
         from PySide6.QtWidgets import QApplication, QColorDialog, QPushButton
         import s360_gui as gui
+        # Проверки прежних экранов: состояние подключения изолировано от хоста.
+        patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
 
         app = QApplication([])
+        app.setFont(gui.theme.application_font())
         app.setStyleSheet(gui.STYLE)
         window = gui.MainWindow()
         window.show()

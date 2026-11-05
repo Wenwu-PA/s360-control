@@ -22,6 +22,8 @@ def main():
         from PySide6.QtCore import QEventLoop, QTimer
         from PySide6.QtWidgets import QApplication, QMessageBox
         import s360_gui as gui
+        # Проверки прежних экранов: состояние подключения изолировано от хоста.
+        patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
 
         def forbidden(*args, **kwargs):
@@ -63,6 +65,7 @@ def main():
             assert page.worker is None, "SendWorker не завершился"
 
         app = QApplication([])
+        app.setFont(gui.theme.application_font())
         app.setStyleSheet(gui.STYLE)
         with (patch.object(core, "do_send", side_effect=fake_send),
               patch.object(core, "find_hidraw", side_effect=forbidden),

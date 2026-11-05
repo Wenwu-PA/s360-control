@@ -16,6 +16,8 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from PySide6.QtWidgets import QApplication, QMessageBox
         import s360_gui as gui
+        # Проверки прежних экранов: состояние подключения изолировано от хоста.
+        patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
 
         connected, state, fail = True, "inactive", False
@@ -43,6 +45,7 @@ def main():
             return 0, ""
 
         app = QApplication([])
+        app.setFont(gui.theme.application_font())
         app.setStyleSheet(gui.STYLE)
         with (patch.object(gui, "systemctl", side_effect=service),
               patch.object(gui, "unit_installed", return_value=True) as installed,
