@@ -81,7 +81,7 @@ def check_rotation(app, lcd, core, tmp):
             lcd.src = str(src)
             for angle in (0, 90, 180, 270):
                 lcd.cmb_rot.setCurrentIndex(lcd.cmb_rot.findData(angle))
-                assert lcd.lbl_orientation.text() == f"240 × 320 px · поворот картинки {angle}°"
+                assert lcd.lbl_orientation.toolTip() == f"Поворот картинки {angle}°"
                 assert "LCD: 180°" in lcd.lbl_device_orientation.text()
                 for scale in ("fit", "stretch", "fill"):
                     lcd.cmb_scale.setCurrentIndex(lcd.cmb_scale.findData(scale))
@@ -93,7 +93,7 @@ def check_rotation(app, lcd, core, tmp):
                     loop = QEventLoop()
                     QTimer.singleShot(350, loop.quit)
                     loop.exec()  # Настоящий сигнал timeout обновляет предпросмотр.
-                    preview = lcd.lbl_prev.pixmap().toImage()
+                    preview = lcd.preview_pixmap.toImage()
                     fx = fy = focus / 100
                     verify(preview, angle, scale, fx, fy, 0)
                     preview_params = dict(core.ENC)
@@ -124,27 +124,28 @@ def main():
         from PySide6.QtGui import QColor
         from PySide6.QtWidgets import QApplication, QColorDialog, QPushButton
         import s360_gui as gui
+        # Проверки прежних экранов: состояние подключения изолировано от хоста.
+        patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
 
         app = QApplication([])
+        app.setFont(gui.theme.application_font())
         app.setStyleSheet(gui.STYLE)
         window = gui.MainWindow()
         window.show()
         app.processEvents()
         lcd = window.pages[1][1]
         assert window.stack.count() == 3
-        assert lcd.s == core.DEFAULT_SETTINGS
+        assert lcd.s == dict(core.DEFAULT_SETTINGS, fps="60")
         assert lcd.worker is None
-        assert not lcd.chk_detach.isChecked()
-        assert lcd.advanced.isHidden()
-        lcd.btn_advanced.click()
-        assert not lcd.advanced.isHidden()
-        lcd.btn_advanced.click()
-        assert lcd.advanced.isHidden()
+        assert not hasattr(lcd, "chk_detach") and not hasattr(lcd, "chk_select")
+        lcd.btn_crop.click()
+        assert not lcd.crop_dialog.isHidden()
+        lcd.crop_dialog.close()
         modes = {b.text(): b for b in lcd.findChildren(QPushButton)}
         modes["Изображение / GIF"].click()
         assert modes["Изображение / GIF"].isChecked()
-        assert not modes["Мониторинг"].isEnabled()
+        assert "Мониторинг" not in modes
         assert modes["Часы"].isEnabled()
         assert "Баннер" not in modes and "Погода" not in modes
         for scale in ("fit", "stretch", "fill"):
@@ -181,11 +182,12 @@ def main():
         saved["device_direction"] = 180
         restored = gui.LcdPage(saved)
         assert restored.background_value() == "gray"
-        assert restored.lbl_orientation.text() == "240 × 320 px · поворот картинки 90°"
+        assert restored.lbl_orientation.toolTip() == "Поворот картинки 90°"
         assert "LCD: 180°" in restored.lbl_device_orientation.text()
         restored.timer.stop()
         restored.close()
-        check_rotation(app, lcd, core, tmp)
+        if "--skip-rotation" not in sys.argv:
+            check_rotation(app, lcd, core, tmp)
         assert lcd.s["cooling_mode"] == core.DEFAULT_SETTINGS["cooling_mode"]
         assert not core.COOLING_ENV.exists()
         for index in range(3):
@@ -197,7 +199,8 @@ def main():
         QTimer.singleShot(50, app.quit)
         assert app.exec() == 0
         assert not window.isVisible()
-        print("T3 ok: Qt, вкладки, режимы, цвет, настройки; GIF/MP4: четыре угла, подписи, кадры, fit/fill/stretch; отправок нет")
+        detail = "проверка кадров пропущена (--skip-rotation)" if "--skip-rotation" in sys.argv else "GIF/MP4: четыре угла, подписи, кадры, fit/fill/stretch"
+        print(f"T3 ok: Qt, вкладки, режимы, цвет, настройки; {detail}; отправок нет")
 
 
 if __name__ == "__main__":
