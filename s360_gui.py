@@ -871,17 +871,21 @@ class LcdPage(QWidget):
 
 class CurveGraph(QWidget):
     changed = Signal(int, int, int)
+    selected = Signal()
 
     def __init__(self, channel):
         super().__init__()
         self.channel = channel
         self.values = {"temp": [0] * 4, "duty": [0] * 4}
         self.dragging = None
-        self.setMinimumSize(220, 200)
+        self.active_point = 0
+        self.compact = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMinimumSize(220, 150)
 
     def plot_rect(self):
         margin = self.fontMetrics().height()
-        return QRectF(36, margin + 12, self.width() - 52, self.height() - 3 * margin - 24)
+        return QRectF(36, margin + 12, self.width() - 52, self.height() - 2 * margin - 24)
 
     def point_position(self, index):
         r = self.plot_rect()
@@ -892,124 +896,141 @@ class CurveGraph(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = self.plot_rect()
-        if self.channel == "pump":
-            y = r.bottom() - core.PUMP_MIN_DUTY * r.height() / 100
-            p.fillRect(QRectF(r.left(), y, r.width(), r.bottom() - y), QColor("#292c33"))
-            p.setPen(QColor("#9aa3b2"))
-            p.drawText(QPointF(r.left() + 5, y + 16), "ниже 60% нельзя")
+        p.setPen(QColor(theme.COLORS["secondary"]))
+        p.drawText(QPointF(r.left(), self.fontMetrics().ascent()), "Мощность, %")
+        p.drawText(QPointF(r.right() - self.fontMetrics().horizontalAdvance("CPU, °C"),
+                          self.fontMetrics().ascent()), "CPU, °C")
         for value in (0, 25, 50, 75, 100):
             x = r.left() + value * r.width() / 100
             y = r.bottom() - value * r.height() / 100
-            p.setPen(QColor("#30343b"))
+            p.setPen(QColor(theme.COLORS["control"]))
             p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
             p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
-            p.setPen(QColor("#8b93a3"))
+            p.setPen(QColor(theme.COLORS["secondary"]))
             p.drawText(QPointF(x - 8, r.bottom() + 18), str(value))
-            if value in (0, 50, 100):
-                p.drawText(QPointF(4, y + 4), str(value))
-        p.drawText(QPointF(r.right() - 18, r.bottom() + 18 + self.fontMetrics().height()), "°C")
-        p.drawText(QPointF(4, self.fontMetrics().ascent()), "%")
-        p.setClipRect(r.adjusted(-6, -6, 6, 6))
-        p.setPen(QPen(QColor("#f06470"), 2.5))
+            p.drawText(QPointF(4, y + 4), str(value))
+        p.setClipRect(r.adjusted(-7, -7, 7, 7))
+        p.setPen(QPen(QColor(theme.COLORS["line"]), 1.5))
         points = [self.point_position(i) for i in range(4)]
-        p.drawPolyline(QPolygonF([QPointF(r.left(), points[0].y()), *points,
-                                 QPointF(r.right(), points[-1].y())]))
-        p.setBrush(QColor("#1a1d23"))
-        for point in points:
-            p.drawEllipse(point, 5, 5)
+        p.drawPolyline(QPolygonF(points))
+        p.setBrush(QColor(theme.COLORS["line"]))
+        for i, point in enumerate(points):
+            radius = (3.5 if i == self.active_point and self.hasFocus() else 2.5)
+            p.drawEllipse(point, radius, radius)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            was_compact = self.compact
+            self.selected.emit()
+            if was_compact:
+                return
+            self.setFocus()
             distances = [(self.point_position(i) - event.position()).manhattanLength() for i in range(4)]
             nearest = min(range(4), key=distances.__getitem__)
             if distances[nearest] <= 18:
-                self.dragging = nearest
+                self.dragging = self.active_point = nearest
+                self.update()
 
     def mouseMoveEvent(self, event):
         if self.dragging is None:
             return
         r = self.plot_rect()
         temp = round(max(0, min(100, (event.position().x() - r.left()) * 100 / r.width())))
-        duty = round(max(0, min(100, (r.bottom() - event.position().y()) * 100 / r.height())))
-        if self.channel == "pump":
-            duty = max(core.PUMP_MIN_DUTY, duty)
-        # Порядок соседних точек по-прежнему проверяет ядро.
+        duty = round(max(core.PUMP_MIN_DUTY if self.channel == "pump" else 0,
+                         min(100, (r.bottom() - event.position().y()) * 100 / r.height())))
         self.changed.emit(self.dragging, temp, duty)
-        QToolTip.showText(event.globalPosition().toPoint(), f"{temp}° · {duty}%", self)
+        i = self.dragging
+        QToolTip.showText(event.globalPosition().toPoint(),
+                          f'{self.values["temp"][i]}° · {self.values["duty"][i]}%', self)
 
     def mouseReleaseEvent(self, event):
         self.dragging = None
         QToolTip.hideText()
 
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            if self.compact:
+                self.selected.emit()
+                return
+            i = self.active_point
+            temp, duty = self.values["temp"][i], self.values["duty"][i]
+            temp += (event.key() == Qt.Key.Key_Right) - (event.key() == Qt.Key.Key_Left)
+            duty += (event.key() == Qt.Key.Key_Up) - (event.key() == Qt.Key.Key_Down)
+            self.changed.emit(i, temp, duty)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
 
 class CurveCard(QGroupBox):
     changed = Signal()
+    selected = Signal()
 
-    def __init__(self, channel, title, description):
+    def __init__(self, channel, title):
         super().__init__(title)
         self.channel = channel
+        self.setProperty("lcdCard", True)
         layout = QVBoxLayout(self)
-        layout.addWidget(muted(description))
         self.graph = CurveGraph(channel)
-        layout.addWidget(self.graph)
+        self.graph.selected.connect(self.selected)
+        layout.addWidget(self.graph, 1)
         self.chips_widget = QWidget()
         chips = QGridLayout(self.chips_widget)
         chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(8)
         self.chips = []
         for index in range(4):
-            button = QPushButton()
-            button.setStyleSheet("padding: 7px 5px;")
-            button.clicked.connect(lambda checked=False, i=index: self.edit_point(i))
-            chips.addWidget(button, index // 2, index % 2)
-            self.chips.append(button)
+            chips.addWidget(muted(f"Точка {index + 1}"), 0, index)
+            pair = QWidget()
+            row = QHBoxLayout(pair)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            inputs = {}
+            for key, suffix in (("temp", "°"), ("duty", "%")):
+                spin = QSpinBox()
+                spin.setRange(core.PUMP_MIN_DUTY if channel == "pump" and key == "duty" else 0, 100)
+                spin.setSuffix(suffix)
+                spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+                spin.setMinimumWidth(48)
+                spin.setAccessibleName(f"{title}, точка {index + 1}, {'температура' if key == 'temp' else 'мощность'}")
+                spin.setKeyboardTracking(False)
+                spin.setCorrectionMode(QSpinBox.CorrectionMode.CorrectToNearestValue)
+                spin.valueChanged.connect(lambda value, i=index, k=key: self.input_changed(i, k, value))
+                row.addWidget(spin)
+                inputs[key] = spin
+            chips.addWidget(pair, 1, index)
+            self.chips.append(inputs)
         layout.addWidget(self.chips_widget)
-        self.placeholder = muted("Кривую задаёт сама водянка — программа её не видит")
-        self.placeholder.setMinimumHeight(200)
-        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.placeholder)
         self.graph.changed.connect(self.move_point)
 
     def set_values(self, values):
         self.graph.values = deepcopy(values)
-        for i, chip in enumerate(self.chips):
-            chip.setText(f'{values["temp"][i]}° · {values["duty"][i]}%')
+        for i, inputs in enumerate(self.chips):
+            for key, spin in inputs.items():
+                spin.blockSignals(True)
+                spin.setValue(values[key][i])
+                spin.blockSignals(False)
         self.graph.update()
+
+    def input_changed(self, index, key, value):
+        temp, duty = self.graph.values["temp"][index], self.graph.values["duty"][index]
+        self.move_point(index, value if key == "temp" else temp, value if key == "duty" else duty)
 
     def move_point(self, index, temp, duty):
         values = deepcopy(self.graph.values)
+        t, d = values["temp"], values["duty"]
+        temp = max(t[index - 1] + 1 if index else 0,
+                   min(t[index + 1] - 1 if index < 3 else 100, temp))
+        duty = max(d[index - 1] if index else 0, core.PUMP_MIN_DUTY if self.channel == "pump" else 0,
+                   min(d[index + 1] if index < 3 else 100, duty))
         values["temp"][index], values["duty"][index] = temp, duty
         self.set_values(values)
         self.changed.emit()
 
-    def edit_point(self, index):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Изменить точку")
-        form = QFormLayout(dialog)
-        inputs = {}
-        for key, title in (("temp", "Температура, °C"), ("duty", "Обороты, %")):
-            spin = QSpinBox()
-            spin.setRange(-100000, 100000)
-            spin.setValue(self.graph.values[key][index])
-            form.addRow(title, spin)
-            inputs[key] = spin
-        if self.channel == "pump":
-            form.addRow("", muted("Минимум 60%; меньшее значение будет поднято до 60%."))
-        buttons = QDialogButtonBox()
-        buttons.addButton("Готово", QDialogButtonBox.ButtonRole.AcceptRole)
-        buttons.addButton("Отмена", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        form.addRow(buttons)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            duty = inputs["duty"].value()
-            if self.channel == "pump":
-                duty = max(core.PUMP_MIN_DUTY, duty)
-            self.move_point(index, inputs["temp"].value(), duty)
-
-    def set_custom(self, custom):
-        self.graph.setVisible(custom)
-        self.chips_widget.setVisible(custom)
-        self.placeholder.setVisible(not custom)
+    def set_compact(self, compact):
+        self.graph.compact = compact
+        self.graph.setMinimumHeight(120 if compact else 200)
+        self.chips_widget.setVisible(not compact)
 
 
 class CoolingPage(QWidget):
@@ -1025,12 +1046,11 @@ class CoolingPage(QWidget):
         scroll.setWidget(self.content)
         page.addWidget(scroll)
         lay = QVBoxLayout(self.content)
-        lay.addWidget(QLabel("Охлаждение"))
         self.mode_row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.group = QButtonGroup(self)
         self.buttons = {}
-        for key, description in (("silent", "Тише всего"), ("balance", "На каждый день"),
-                                 ("game", "Максимум охлаждения"), ("custom", "Настрой сам")):
+        for key, description in (("silent", "Меньше шума"), ("balance", "Повседневная работа"),
+                                 ("game", "Больше охлаждения"), ("custom", "3 независимых канала")):
             b = QPushButton(f"{COOLING_TITLES[key]}\n{description}")
             b.setProperty("coolingCard", True)
             b.setCheckable(True)
@@ -1041,18 +1061,34 @@ class CoolingPage(QWidget):
         lay.addLayout(self.mode_row)
         self.hint = muted("")
         lay.addWidget(self.hint)
+        self.preset_box = QGroupBox()
+        preset = QVBoxLayout(self.preset_box)
+        self.preset_title = QLabel()
+        preset.addWidget(self.preset_title)
+        preset.addWidget(muted("Встроенный режим охлаждения"))
+        preset_body = QHBoxLayout()
+        preset_body.addWidget(muted("Вентилятор радиатора     —\n\nВентилятор водоблока     —\n\nПомпа     —"), 1)
+        preset_body.addWidget(muted("Кривые встроенного режима недоступны для чтения.\n"
+                                   "Для редактирования выбери «Свой профиль»."), 1)
+        preset.addLayout(preset_body, 1)
+        self.preset_box.setMinimumHeight(300)
+        lay.addWidget(self.preset_box)
+        self.component_tabs = QTabBar()
+        for title in ("Радиатор", "Водоблок", "Помпа"):
+            self.component_tabs.addTab(title)
+        lay.addWidget(self.component_tabs)
         self.curves_box = QWidget()
-        self.cards_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, self.curves_box)
+        self.cards_layout = QGridLayout(self.curves_box)
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
         self.cards = {}
-        for channel, title, description in (
-                ("radiator1", "Вентилятор радиатора", "Все три вентилятора вместе"),
-                ("waterblock", "Вентилятор водоблока", "Маленький вентилятор на помпе"),
-                ("pump", "Помпа", "Минимум 60% — защита процессора")):
-            card = CurveCard(channel, title, description)
+        self.active_channel = "radiator1"
+        for channel, title in (("radiator1", "Вентилятор радиатора"),
+                               ("waterblock", "Вентилятор водоблока"), ("pump", "Помпа")):
+            card = CurveCard(channel, title)
             self.cards[channel] = card
-            self.cards_layout.addWidget(card, 1)
             card.changed.connect(self.update_dirty)
+            card.selected.connect(lambda ch=channel: self.select_component(ch))
+        self.component_tabs.currentChanged.connect(lambda i: self.select_component(tuple(self.cards)[i]))
         lay.addWidget(self.curves_box)
         self.curves_status = muted("")
         try:
@@ -1083,8 +1119,8 @@ class CoolingPage(QWidget):
         lay.addLayout(actions)
         self.btn_details = QToolButton()
         self.btn_details.setText("Подробности")
+        self.btn_details.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.btn_details.setCheckable(True)
-        self.btn_details.setArrowType(Qt.ArrowType.RightArrow)
         lay.addWidget(self.btn_details)
         self.details = QWidget()
         dl = QVBoxLayout(self.details)
@@ -1121,25 +1157,48 @@ class CoolingPage(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        narrow = self.width() < 960
-        direction = QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
-        self.cards_layout.setDirection(direction)
-        self.mode_row.setDirection(QBoxLayout.Direction.TopToBottom if self.width() < 700
-                                   else QBoxLayout.Direction.LeftToRight)
+        self.layout_components()
+
+    def select_component(self, channel):
+        self.active_channel = channel
+        self.component_tabs.blockSignals(True)
+        self.component_tabs.setCurrentIndex(tuple(self.cards).index(channel))
+        self.component_tabs.blockSignals(False)
+        self.layout_components()
+
+    def layout_components(self):
+        narrow = self.window().width() < 1100
+        custom = self.mode() == "custom"
+        self.component_tabs.setVisible(narrow and custom)
+        for card in self.cards.values():
+            self.cards_layout.removeWidget(card)
+        small_row = 0
+        for channel, card in self.cards.items():
+            active = channel == self.active_channel
+            card.set_compact(not active)
+            card.setVisible(custom and (active or not narrow))
+            if active:
+                self.cards_layout.addWidget(card, 0, 0, 2, 1)
+            else:
+                self.cards_layout.addWidget(card, small_row, 1)
+                small_row += 1
+        self.cards_layout.setColumnStretch(0, 2)
+        self.cards_layout.setColumnStretch(1, 0 if narrow else 1)
 
     def show_details(self, checked):
         self.details.setVisible(checked)
-        self.btn_details.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
 
     def mode(self):
         return next((key for key, b in self.buttons.items() if b.isChecked()), "balance")
 
     def mode_changed(self):
         custom = self.mode() == "custom"
-        for card in self.cards.values():
-            card.set_custom(custom)
-        self.hint.setText("Тяни точки на графике или нажми на значение под ним и введи число."
-                          if custom else "Готовый режим производителя. Для изменения выбери «Свой профиль».")
+        self.curves_box.setVisible(custom)
+        self.preset_box.setVisible(not custom)
+        self.preset_title.setText(COOLING_TITLES[self.mode()])
+        self.hint.setText("Выбери компонент. Точки можно перетаскивать или вводить числом." if custom else "")
+        self.hint.setVisible(custom)
+        self.layout_components()
         self.btn_reset_curves.setEnabled(custom)
         self.update_dirty()
 
@@ -1441,9 +1500,9 @@ class MainWindow(QMainWindow):
         self.tabs.setDrawBase(False)
         for name, page in self.pages:
             self.tabs.addTab(name)
-            # LCD уже содержит собственную прокрутку; остальные старые страницы
+            # LCD и охлаждение содержат собственную прокрутку; остальные страницы
             # прокручиваются внутри каркаса, не затрагивая нижнюю полосу.
-            if isinstance(page, LcdPage):
+            if isinstance(page, (LcdPage, CoolingPage)):
                 self.stack.addWidget(page)
             else:
                 scroll = QScrollArea()

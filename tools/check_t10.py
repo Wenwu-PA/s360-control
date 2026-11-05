@@ -16,7 +16,7 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from PySide6.QtCore import QPointF, Qt
         from PySide6.QtGui import QMouseEvent
-        from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QSpinBox
+        from PySide6.QtWidgets import QApplication, QMessageBox
         import s360_gui as gui
         # Проверки прежних экранов: состояние подключения изолировано от хоста.
         patch.object(gui, "device_access", return_value="ready").start()
@@ -61,7 +61,7 @@ def main():
             page = window.pages[2][1]
             assert window.isVisible() and not errors  # 1: запуск настоящего GUI
             assert tuple(page.cards) == ('radiator1', 'waterblock', 'pump')
-            assert all(not c.placeholder.isHidden() and c.graph.isHidden() for c in page.cards.values())  # 2
+            assert not page.preset_box.isHidden() and page.curves_box.isHidden()  # 2
             page.buttons['custom'].click()
             page.apply()
             assert not calls and 'Сохранить' in warning.call_args.args[2]  # 3: нет файла — нет запуска
@@ -86,6 +86,8 @@ def main():
             page.save_curves()
             saved = core.load_curves()
             assert all(saved[ch] == curves[ch] for ch in ('radiator2', 'radiator3')) and not calls  # 5
+            page.select_component('pump')
+            app.processEvents()
             pump = page.cards['pump']
             graph = pump.graph
             start = graph.point_position(0)
@@ -99,13 +101,7 @@ def main():
                                                 Qt.KeyboardModifier.NoModifier))
             assert graph.values['duty'][0] == 60 and not warning.called
 
-            def enter_low_duty(dialog):
-                dialog.findChildren(QSpinBox)[1].setValue(59)
-                assert any('60%' in label.text() for label in dialog.findChildren(gui.QLabel))
-                return QDialog.DialogCode.Accepted
-
-            with patch.object(QDialog, 'exec', enter_low_duty):
-                pump.edit_point(0)
+            pump.chips[0]['duty'].setValue(59)
             assert graph.values['duty'][0] == 60 and not warning.called and not calls  # 6: зажим обоих способов
             page.reset_curves()
             assert all(page.raw_curves()[ch] == curves[ch] for ch in ('radiator2', 'radiator3'))
@@ -122,7 +118,7 @@ def main():
             page.apply()
             assert len(calls) == before and core.CURVES_FILE.read_text() == '{broken'  # 9
             page.buttons['balance'].click()
-            assert all(c.graph.isHidden() and not c.placeholder.isHidden() for c in page.cards.values())
+            assert page.curves_box.isHidden() and not page.preset_box.isHidden()
             page.apply()
             assert core.COOLING_ENV.read_text() == 'MODE=balance\n' and len(calls) == before + 1
             window.close()

@@ -77,12 +77,11 @@ def main():
             original = core.CURVES_FILE.read_text()
             page.btn_apply.click()  # Отмена ничего не применяет.
             assert question.called and not core.COOLING_ENV.exists()
+            warning.reset_mock()
             page.cards["pump"].move_point(0, 59, 59)
             page.btn_save_curves.click()
-            assert "60%" in warning.call_args.args[2] and core.CURVES_FILE.read_text() == original
+            assert page.cards["pump"].graph.values["duty"][0] == 60 and not warning.called
             question.return_value = QMessageBox.StandardButton.Yes
-            page.btn_apply.click()
-            assert warning.call_args.args[1] == "Некорректный профиль" and not calls
             page.btn_reset_curves.click()
             for channel, key, index, value in (("radiator1", "temp", 1, 48),
                                                ("radiator1", "duty", 1, 1)):
@@ -90,7 +89,8 @@ def main():
                 page.cards[channel].move_point(index, value if key == "temp" else values["temp"][index],
                                                 value if key == "duty" else values["duty"][index])
                 page.btn_save_curves.click()
-                assert core.CURVES_FILE.read_text() == original
+                core.validate_curves(page.raw_curves())
+                assert not warning.called
                 page.btn_reset_curves.click()
             page.cards["pump"].move_point(1, 68, 72)
             page.btn_save_curves.click()

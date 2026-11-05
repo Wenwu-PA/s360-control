@@ -67,7 +67,7 @@ def main():
             window.stack.setCurrentIndex(2)
             assert window.footer.isAncestorOf(cooling.btn_apply) and window.footer.isAncestorOf(cooling.status)
             assert not cooling.btn_apply.isEnabled() and "не установлен" in cooling.status.text()  # 9
-            scroll = window.stack.widget(2)
+            scroll = cooling.findChild(QScrollArea)
             assert isinstance(scroll, QScrollArea) and not scroll.isAncestorOf(window.footer)
             window.close()
             app.processEvents()
