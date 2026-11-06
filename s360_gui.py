@@ -350,6 +350,20 @@ class LcdPage(QWidget):
             controls.addWidget(muted(title), 0, col)
             controls.addWidget(widget, 1, col)
         pl.addLayout(controls)
+        position_row = QHBoxLayout()
+        position_row.addWidget(muted("Положение экрана"))
+        self.position_group = QButtonGroup(self)
+        self.position_buttons = {}
+        for angle in (0, 90, 180, 270):
+            button = QPushButton(f"{angle}°")
+            button.setCheckable(True)
+            button.setToolTip("Как повёрнут экран водянки. Картинка повернётся сама, чтобы выглядеть прямо")
+            self.position_group.addButton(button, angle)
+            self.position_buttons[angle] = button
+            button.setChecked(angle == int(self.s["screen_pos"]))
+            position_row.addWidget(button)
+        self.position_group.idClicked.connect(self.select_position)
+        pl.addLayout(position_row)
         bg_row = QHBoxLayout()
         self.btn_bg = QPushButton("Выбрать цвет…")
         self.bg_sample = QLabel()
@@ -413,6 +427,8 @@ class LcdPage(QWidget):
         clock_form.addWidget(self.lbl_clock_time)
         clock_note = muted("После отправки часы идут сами. Вернуть картинку можно на вкладке «Изображение / GIF».")
         clock_form.addWidget(clock_note)
+        self.lbl_clock_position = muted("Часы пока не поворачиваются под положение экрана")
+        clock_form.addWidget(self.lbl_clock_position)
         self.lbl_clock_status = muted("Часы из этого сеанса ещё не отправлялись. Состояние LCD не считано.")
         self.lbl_clock_status.hide()
         self.btn_clock = QPushButton("Показать часы")
@@ -459,7 +475,12 @@ class LcdPage(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.resize_preview()
+
+    def resize_preview(self):
         width, height = (168, 224) if self.width() < 1100 else (core.W, core.H)
+        if self.s["lcd_mode"] != "clock" and int(self.s["screen_pos"]) in (90, 270):
+            width, height = height, width
         self.preview_stack.setFixedSize(width, height)
         self.lbl_prev.setFixedSize(width, height)
         self.scale_preview()
@@ -572,9 +593,18 @@ class LcdPage(QWidget):
             self.cmb_bg.setCurrentIndex(self.cmb_bg.findData("custom"))
             self.changed()
 
+    def select_position(self, angle):
+        self.s["screen_pos"] = angle
+        self.changed()
+
     def update_orientation(self):
-        self.lbl_orientation.setText("Примерный вид, стиль 1" if self.s["lcd_mode"] == "clock" else
-                                     f"{core.W} × {core.H} · {Path(self.src).name if self.src else '—'}")
+        position = int(self.s["screen_pos"])
+        width, height = (core.H, core.W) if position in (90, 270) else (core.W, core.H)
+        caption = f"{width} × {height} · положение {position}° · поворот картинки {self.s['rotate']}°"
+        self.lbl_orientation.setText(caption + (" · Примерный вид, стиль 1" if self.s["lcd_mode"] == "clock" else
+                                              f" · {Path(self.src).name if self.src else 'файл не выбран'}"))
+        self.lbl_clock_position.setVisible(position != 0)
+        self.resize_preview()
         self.lbl_orientation.setToolTip(f"Поворот картинки {self.s['rotate']}°")
 
     # --- настройки
@@ -589,7 +619,7 @@ class LcdPage(QWidget):
     def apply_enc(self):
         core.ENC.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
                         scale=self.cmb_scale.currentData(), focus_x=0.5,
-                        focus_y=0.5, rotate=int(self.cmb_rot.currentData()),
+                        focus_y=0.5, rotate=int(self.cmb_rot.currentData()), orient=int(self.s["screen_pos"]),
                         background=self.background_value(),
                         edge_trim=self.spn_trim.value())
 
@@ -654,7 +684,7 @@ class LcdPage(QWidget):
         try:
             self.apply_enc()
             png = Path(self.tmp.name) / "preview.png"
-            core.preview_png(Path(self.src), png)
+            core.preview_png(Path(self.src), png, viewer=True)
             # Загрузка байтов исключает возврат старого кадра из файлового кеша Qt.
             self.preview_pixmap = QPixmap()
             self.preview_pixmap.loadFromData(png.read_bytes())
@@ -727,6 +757,8 @@ class LcdPage(QWidget):
             above_tested = dur is not None and dur > 8.95
         extra = ("\n\nПараметры выше проверенного: 8,95 с / 60 кадров/с. Возможно зависание картинки; "
                  "восстановить можно через MSI Center.") if above_tested else ""
+        if self.s["screen_pos"]:
+            info += f"\nПоложение экрана: {self.s['screen_pos']}°"
         r = QMessageBox.question(
             self, "Подтверждение",
             f"Файл: {len(data)} байт{info}\nSHA256: {sha[:16]}…\n{ref}\n\nЭто ПЕРЕЗАПИШЕТ слот на экране "
@@ -920,16 +952,18 @@ class CurveCard(QGroupBox):
         for index in range(4):
             chips.addWidget(muted(f"Точка {index + 1}"), 0, index)
             pair = QWidget()
-            row = QHBoxLayout(pair)
+            row = QVBoxLayout(pair)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(4)
             inputs = {}
-            for key, suffix in (("temp", "°"), ("duty", "%")):
+            for key, suffix in (("temp", " °C"), ("duty", " %")):
                 spin = QSpinBox()
                 spin.setRange(core.PUMP_MIN_DUTY if channel == "pump" and key == "duty" else 0, 100)
                 spin.setSuffix(suffix)
                 spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-                spin.setMinimumWidth(48)
+                spin.setMinimumWidth(spin.fontMetrics().horizontalAdvance("100 °C") + 24)
+                spin.setStyleSheet(f"QSpinBox {{ color: {theme.COLORS['text']}; padding: 4px; }} "
+                                  f"QSpinBox QLineEdit {{ color: {theme.COLORS['text']}; background: transparent; border: none; padding: 0; }}")
                 spin.setAccessibleName(f"{title}, точка {index + 1}, {'температура' if key == 'temp' else 'мощность'}")
                 spin.setKeyboardTracking(False)
                 spin.setCorrectionMode(QSpinBox.CorrectionMode.CorrectToNearestValue)
@@ -1074,6 +1108,8 @@ class CoolingPage(QWidget):
         self.btn_service = QPushButton("Остановить передачу температуры")
         dl.addWidget(self.btn_service)
         self.chk_auto = QCheckBox("Запускать при входе в систему")
+        self.chk_auto.setChecked(True)
+        self.chk_auto.setToolTip("Изменение вступит в силу после нажатия «Применить»")
         dl.addWidget(self.chk_auto)
         self.btn_reset_curves = QPushButton("Сбросить видимые точки к образцу")
         dl.addWidget(self.btn_reset_curves)
@@ -1086,7 +1122,6 @@ class CoolingPage(QWidget):
         self.btn_reset_curves.clicked.connect(self.reset_curves)
         self.btn_apply.clicked.connect(self.apply)
         self.btn_service.clicked.connect(self.stop)
-        self.chk_auto.clicked.connect(self.autostart)
         for button in self.buttons.values():
             button.toggled.connect(self.mode_changed)
         lay.addStretch()
@@ -1256,6 +1291,9 @@ class CoolingPage(QWidget):
             return
         self.service_error = ""
         self.set_service_status("Запускается", "Запускается передача температуры процессора…", WARN)
+        if not self.autostart(self.chk_auto.isChecked()):
+            self.refresh()
+            return
         code, out = systemctl(command, UNIT)
         if code != 0:
             self.service_error = out or "Не удалось запустить сервис"
@@ -1281,7 +1319,8 @@ class CoolingPage(QWidget):
         code, out = systemctl("enable" if checked else "disable", UNIT)
         if code != 0:
             QMessageBox.warning(self, "Ошибка", out)
-        self.refresh()
+            return False
+        return True
 
     def journal_line(self):
         try:
@@ -1306,7 +1345,6 @@ class CoolingPage(QWidget):
         self.last_mode.setText(f"Последний отправленный режим: {last}. Обратного чтения с устройства нет.")
         if not inst:
             self.set_service_status("Остановлен", "Сервис не установлен — выполни ./install.sh вручную", WARN)
-            self.chk_auto.setChecked(False)
             return
         code, state = systemctl("is-active", UNIT)
         # Restart=on-failure может скрыть падение за состоянием activating (auto-restart).
@@ -1317,7 +1355,6 @@ class CoolingPage(QWidget):
             restart_error = (properties.get("SubState") == "auto-restart"
                              and properties.get("Result") not in (None, "success"))
         self.status.setToolTip("")
-        self.chk_auto.setChecked(systemctl("is-enabled", UNIT)[1] == "enabled")
         if state not in ("active", "inactive", "failed", "activating", "reloading", "deactivating"):
             self.set_service_status("Неизвестно", "Статус сервиса неизвестен", WARN)
             self.status.setToolTip(state)

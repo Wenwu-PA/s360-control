@@ -19,8 +19,9 @@ def check_rotation(app, lcd, core, tmp):
     send() проходит настоящую подготовку файла, но останавливается до отправки.
     """
     from PySide6.QtCore import QEventLoop, QTimer
-    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtGui import QColor, QImage, QTransform
 
+    lcd.select_mode("media")
     colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
     for frame in range(2):
         image = QImage(320, 160, QImage.Format.Format_RGB32)
@@ -37,15 +38,16 @@ def check_rotation(app, lcd, core, tmp):
                     str(mp4)], check=True, timeout=30)
 
     def expected(x, y, angle, scale, fx, fy, frame):
+        vw, vh = (320, 240) if position in (90, 270) else (240, 320)
         rw, rh = (160, 320) if angle in (90, 270) else (320, 160)
         if scale == "stretch":
-            rx, ry = x * rw / 240, y * rh / 320
+            rx, ry = x * rw / vw, y * rh / vh
         else:
-            ratio = (min if scale == "fit" else max)(240 / rw, 320 / rh)
+            ratio = (min if scale == "fit" else max)(vw / rw, vh / rh)
             if scale == "fit":
-                rx, ry = (x - (240 - rw * ratio) / 2) / ratio, (y - (320 - rh * ratio) / 2) / ratio
+                rx, ry = (x - (vw - rw * ratio) / 2) / ratio, (y - (vh - rh * ratio) / 2) / ratio
             else:
-                rx, ry = (x + (rw * ratio - 240) * fx) / ratio, (y + (rh * ratio - 320) * fy) / ratio
+                rx, ry = (x + (rw * ratio - vw) * fx) / ratio, (y + (rh * ratio - vh) * fy) / ratio
         if not (0 <= rx < rw and 0 <= ry < rh):
             return (0, 0, 0)
         sx, sy = {0: (rx, ry), 90: (ry, 160 - rx),
@@ -53,9 +55,10 @@ def check_rotation(app, lcd, core, tmp):
         return colors[(int(sy >= 80) * 2 + int(sx >= 160) + frame) % 4]
 
     def verify(image, angle, scale, fx, fy, frame):
-        assert (image.width(), image.height()) == (240, 320)
-        for x in (24, 72, 168, 216):
-            for y in (32, 96, 224, 288):
+        vw, vh = (320, 240) if position in (90, 270) else (240, 320)
+        assert (image.width(), image.height()) == (vw, vh)
+        for x in (vw // 10, vw * 3 // 10, vw * 7 // 10, vw * 9 // 10):
+            for y in (vh // 10, vh * 3 // 10, vh * 7 // 10, vh * 9 // 10):
                 want = expected(x, y, angle, scale, fx, fy, frame)
                 got = image.pixelColor(x, y).getRgb()[:3]
                 assert max(abs(a - b) for a, b in zip(got, want)) < 35, (angle, scale, frame, x, y, got, want)
@@ -80,8 +83,14 @@ def check_rotation(app, lcd, core, tmp):
           patch.object(core, "load_media", side_effect=capture_media) as load):
         for src in (gif, mp4):
             lcd.src = str(src)
-            for angle in (0, 90, 180, 270):
+            for position, angle in ((0, 0), (0, 90), (0, 180), (0, 270), (90, 90), (180, 90), (270, 90)):
+                lcd.position_buttons[position].click()
+                frame_size = lcd.preview_stack.size()
+                assert frame_size.width() * (3 if position in (90, 270) else 4) == frame_size.height() * (4 if position in (90, 270) else 3)
+                assert f"положение {position}°" in lcd.lbl_orientation.text()
+                assert lcd.s["screen_pos"] == core.load_settings()["screen_pos"] == position
                 lcd.cmb_rot.setCurrentIndex(lcd.cmb_rot.findData(angle))
+                assert f"поворот картинки {angle}°" in lcd.lbl_orientation.text()
                 assert lcd.lbl_orientation.toolTip() == f"Поворот картинки {angle}°"
                 assert lcd.s["device_direction"] == 180
                 for scale in ("fit", "stretch", "fill"):
@@ -105,6 +114,10 @@ def check_rotation(app, lcd, core, tmp):
                     # Получаем тот же результат подготовки, который использовал send().
                     prepared = Path(tmp) / "prepared.mp4"
                     prepared.write_bytes(prepared_data)
+                    dimensions = subprocess.check_output([
+                        "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                        "-of", "csv=s=x:p=0", str(prepared)], text=True, timeout=30).strip()
+                    assert dimensions == "240x320", dimensions
                     raw = subprocess.check_output([
                         "ffmpeg", "-v", "error", "-i", str(prepared), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                         timeout=30)
@@ -113,7 +126,8 @@ def check_rotation(app, lcd, core, tmp):
                     for frame in range(2):
                         image = QImage(raw[frame * size:(frame + 1) * size], 240, 320, 240 * 3,
                                        QImage.Format.Format_RGB888)
-                        verify(image, angle, scale, fx, fy, frame)
+                        verify(image.transformed(QTransform().rotate(position)), angle, scale, fx, fy, frame)
+    lcd.position_buttons[0].click()
     lcd.src = None
 
 

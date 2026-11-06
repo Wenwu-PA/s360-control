@@ -35,9 +35,10 @@ def main():
                 return (0 if state == 'active' else 3), ('activating' if state == 'auto-restart' else state)
             if command == 'is-enabled':
                 return 1, 'disabled'
-            assert command in ('restart', 'stop')
+            assert command in ('restart', 'stop', 'enable', 'disable')
             calls.append(command)
-            state = 'active' if command == 'restart' else 'inactive'
+            if command in ('restart', 'stop'):
+                state = 'active' if command == 'restart' else 'inactive'
             return 0, ''
 
         app = QApplication([])
@@ -106,7 +107,7 @@ def main():
             page.reset_curves()
             assert all(page.raw_curves()[ch] == curves[ch] for ch in ('radiator2', 'radiator3'))
             page.apply()
-            assert calls == ['restart'] and core.load_curves() == page.editor_curves()
+            assert calls == ['enable', 'restart'] and core.load_curves() == page.editor_curves()
             assert core.COOLING_ENV.read_text() == 'MODE=custom\n' and 'работает' in page.status.text()  # 7
             for state in ('activating', 'auto-restart', 'failed', 'inactive', 'unknown'):
                 page.refresh()
@@ -120,7 +121,7 @@ def main():
             page.buttons['balance'].click()
             assert page.curves_box.isHidden() and not page.preset_box.isHidden()
             page.apply()
-            assert core.COOLING_ENV.read_text() == 'MODE=balance\n' and len(calls) == before + 1
+            assert core.COOLING_ENV.read_text() == 'MODE=balance\n' and len(calls) == before + 2
             window.close()
             app.processEvents()
             assert not errors and not window.isVisible()  # 10: возврат в preset и закрытие

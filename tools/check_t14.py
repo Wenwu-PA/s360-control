@@ -51,7 +51,7 @@ def main():
                 lcd.btn_brightness.click()
                 assert "42%" in question.call_args.args[2] and lcd.pending_brightness is None  # 2
             lcd.mode_buttons["clock"].click()
-            assert lcd.preview_stack.currentIndex() == 1 and lcd.lbl_orientation.text() == "Примерный вид, стиль 1"
+            assert lcd.preview_stack.currentIndex() == 1 and "Примерный вид, стиль 1" in lcd.lbl_orientation.text()
             assert "из системы · UTC" in lcd.lbl_clock_time.text()
             assert "Не отправлено" in window.lcd_badge.text() and "при отправке" in window.lcd_status.text()  # 3
             with patch.object(lcd, "start_worker") as start:
@@ -91,6 +91,24 @@ def main():
                 lcd.btn_send.click()
                 assert start.call_args.args[0] == ["select", "upload"] and select.call_count == 1
                 assert "На время передачи драйвер HID временно отключится" in question.call_args.args[2]  # 7
+            for position in (0, 90, 180, 270):
+                lcd.position_buttons[position].click()
+                lcd.apply_enc()
+                assert core.ENC["orient"] == position
+                width, height = (320, 240) if position in (90, 270) else (240, 320)
+                size = lcd.preview_stack.size()
+                assert size.width() * height == size.height() * width
+                assert f"{width} × {height} · положение {position}°" in lcd.lbl_orientation.text()
+                lcd.mode_buttons["clock"].click()
+                assert lcd.lbl_clock_position.isHidden() == (position == 0)
+                lcd.mode_buttons["media"].click()
+                with (patch.object(core, "load_media", return_value=b"prepared"),
+                      patch.object(core, "probe_mp4", return_value=(3, 100, "30")),
+                      patch.object(lcd, "start_worker", side_effect=forbidden)):
+                    question.return_value = QMessageBox.StandardButton.No
+                    lcd.send()
+                    assert (f"Положение экрана: {position}°" in question.call_args.args[2]) == (position != 0)
+            lcd.position_buttons[0].click()
             with (patch.object(core, "load_media", return_value=b"prepared"),
                   patch.object(lcd, "start_worker", side_effect=forbidden)):
                 question.return_value = QMessageBox.StandardButton.No

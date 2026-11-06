@@ -108,12 +108,21 @@ def main():
             assert calls[-1] == "stop" and not page.btn_service.isEnabled()
             page.btn_apply.click()
             assert calls[-1] == "restart" and page.btn_service.isEnabled()
-            for expected in (True, False):
+            assert page.chk_auto.isChecked() and enabled
+            for expected in (False, True):
+                before = len(calls)
                 page.chk_auto.click()
-                assert enabled == expected and page.chk_auto.isChecked() == expected
+                page.refresh()
+                assert len(calls) == before and enabled != expected
+                assert page.chk_auto.isChecked() == expected
+                page.btn_apply.click()
+                assert enabled == expected and calls[-2:] == ["enable" if expected else "disable", "restart"]
+            page.chk_auto.click()
+            page.btn_apply.click()
             fail_command = "enable"
             page.chk_auto.click()
-            assert not page.chk_auto.isChecked() and warning.call_args.args[1] == "Ошибка"
+            page.btn_apply.click()
+            assert not enabled and page.chk_auto.isChecked() and warning.call_args.args[1] == "Ошибка"
             fail_command = "stop"
             page.btn_service.click()
             assert page.btn_service.isEnabled()
