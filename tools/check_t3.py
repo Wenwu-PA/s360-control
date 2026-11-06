@@ -63,9 +63,10 @@ def check_rotation(app, lcd, core, tmp):
     lcd.cmb_bg.setCurrentIndex(lcd.cmb_bg.findData("black"))
     lcd.spn_trim.setValue(0)
     lcd.edt_fps.setText("5")
-    lcd.spn_sec.setValue(0)
+    lcd.spn_sec.setValue(15)  # Лимит не удлиняет короткий GIF/MP4.
     lcd.s["device_direction"] = 180
-    lcd.cmb_dir.setCurrentIndex(lcd.cmb_dir.findData(90))
+    frame_size = lcd.preview_stack.size()
+    assert frame_size.width() * 4 == frame_size.height() * 3
     load_media = core.load_media
     prepared_data = None
 
@@ -82,17 +83,18 @@ def check_rotation(app, lcd, core, tmp):
             for angle in (0, 90, 180, 270):
                 lcd.cmb_rot.setCurrentIndex(lcd.cmb_rot.findData(angle))
                 assert lcd.lbl_orientation.toolTip() == f"Поворот картинки {angle}°"
-                assert "LCD: 180°" in lcd.lbl_device_orientation.text()
+                assert lcd.s["device_direction"] == 180
                 for scale in ("fit", "stretch", "fill"):
                     lcd.cmb_scale.setCurrentIndex(lcd.cmb_scale.findData(scale))
-                    # X/Y относятся к уже повёрнутому кадру; проверяем и края кадрирования.
-                    focus = 0 if angle in (0, 90) else 100
-                    lcd.sld_x.setValue(focus)
-                    lcd.sld_y.setValue(focus)
+                    # Кадрирование всегда по центру после поворота содержимого.
+                    focus = 50
                     lcd.changed()
                     loop = QEventLoop()
                     QTimer.singleShot(350, loop.quit)
                     loop.exec()  # Настоящий сигнал timeout обновляет предпросмотр.
+                    assert lcd.preview_stack.size() == frame_size
+                    assert lcd.lbl_prev.size() == frame_size
+                    assert lcd.lbl_prev.pixmap().size() == frame_size
                     preview = lcd.preview_pixmap.toImage()
                     fx = fy = focus / 100
                     verify(preview, angle, scale, fx, fy, 0)
@@ -136,12 +138,10 @@ def main():
         app.processEvents()
         lcd = window.pages[1][1]
         assert window.stack.count() == 3
-        assert lcd.s == dict(core.DEFAULT_SETTINGS, fps="60")
+        assert lcd.s == gui.UI_DEFAULT_SETTINGS
         assert lcd.worker is None
         assert not hasattr(lcd, "chk_detach") and not hasattr(lcd, "chk_select")
-        lcd.btn_crop.click()
-        assert not lcd.crop_dialog.isHidden()
-        lcd.crop_dialog.close()
+        assert not hasattr(lcd, "crop_dialog") and not hasattr(lcd, "direction_dialog")
         modes = {b.text(): b for b in lcd.findChildren(QPushButton)}
         modes["Изображение / GIF"].click()
         assert modes["Изображение / GIF"].isChecked()
@@ -150,8 +150,8 @@ def main():
         assert "Баннер" not in modes and "Погода" not in modes
         for scale in ("fit", "stretch", "fill"):
             lcd.cmb_scale.setCurrentIndex(lcd.cmb_scale.findData(scale))
-            assert lcd.sld_x.isEnabled() == (scale == "fill")
-            assert lcd.sld_y.isEnabled() == (scale == "fill")
+            lcd.apply_enc()
+            assert core.ENC["focus_x"] == core.ENC["focus_y"] == 0.5
         for background in ("white", "black", "custom"):
             lcd.cmb_bg.setCurrentIndex(lcd.cmb_bg.findData(background))
             assert lcd.btn_bg.isEnabled() == (background == "custom")
@@ -168,13 +168,11 @@ def main():
         QTimer.singleShot(0, lambda: close_color_dialog(False))
         lcd.btn_bg.click()
         assert lcd.background_value() == "#123456"
-        lcd.sld_x.setValue(23)
-        lcd.sld_y.setValue(78)
         lcd.cmb_rot.setCurrentIndex(lcd.cmb_rot.findData(90))
         lcd.apply_enc()
         saved = core.load_settings()
         assert saved["background"] == core.ENC["background"] == "#123456"
-        assert saved["focus_x"] == 0.23 and saved["focus_y"] == 0.78
+        assert saved["focus_x"] == saved["focus_y"] == 0.5
         assert saved["rotate"] == core.ENC["rotate"] == 90
         assert saved["last_file"] is None and saved["last_upload_time"] is None
         # Старое именованное значение цвета сохраняется при открытии новой страницы.
@@ -183,7 +181,7 @@ def main():
         restored = gui.LcdPage(saved)
         assert restored.background_value() == "gray"
         assert restored.lbl_orientation.toolTip() == "Поворот картинки 90°"
-        assert "LCD: 180°" in restored.lbl_device_orientation.text()
+        assert restored.s["device_direction"] == 180
         restored.timer.stop()
         restored.close()
         if "--skip-rotation" not in sys.argv:

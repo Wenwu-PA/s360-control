@@ -15,6 +15,33 @@ RADII = (4, 8)
 BORDER_WIDTH = 1
 
 
+def install_russian_translation(app):
+    """Держим переводчик живым весь сеанс; без qtbase_ru подписываем кнопки при показе."""
+    from PySide6.QtCore import QEvent, QLibraryInfo, QObject, QTranslator
+    from PySide6.QtWidgets import QDialogButtonBox, QMessageBox
+    if hasattr(app, "_s360_translation"):
+        return
+    translator = QTranslator(app)
+    if translator.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(translator)
+        app._s360_translation = translator
+        return
+
+    class RussianButtons(QObject):
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Type.Show and isinstance(obj, (QDialogButtonBox, QMessageBox)):
+                for name, text in (("Yes", "Да"), ("No", "Нет"), ("Cancel", "Отмена"),
+                                   ("Close", "Закрыть"), ("Ok", "ОК")):
+                    button = obj.button(getattr(type(obj).StandardButton, name))
+                    if button is not None:
+                        button.setText(text)
+            return False
+
+    fallback = RussianButtons(app)
+    app.installEventFilter(fallback)
+    app._s360_translation = fallback
+
+
 def application_font():
     """Qt выбирает установленный Inter, затем Noto Sans, затем системный шрифт."""
     from PySide6.QtGui import QFont, QFontDatabase
@@ -70,7 +97,6 @@ QSlider::sub-page:horizontal {{ background: {c['line']}; }}
 QSlider::handle:horizontal {{ background: {c['text']}; width: 12px; margin: -4px 0; border-radius: 6px; }}
 QSlider::handle:horizontal:disabled {{ background: {c['disabled']}; }}
 QPushButton[lcdMode="true"] {{ text-align: left; border-radius: {medium}px; padding: 12px {space}px; }}
-QPushButton[lcdLink="true"] {{ background: transparent; border: none; color: {c['secondary']}; padding: {gap}px 0; }}
 QGroupBox[lcdCard="true"] {{ margin-top: 0; padding: {space}px; }}
 QGroupBox[lcdCard="true"]::title {{ subcontrol-origin: padding; color: {c['text']}; font-size: {FONT_SIZES['title']}px; }}
 QGroupBox#lcdTile {{ background: {c['control']}; margin-top: 0; padding: {gap}px; }}

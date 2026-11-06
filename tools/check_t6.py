@@ -109,7 +109,7 @@ def main():
                 assert not page.panel.isEnabled() and not page.brightness_panel.isEnabled()
                 count = len(calls)
                 page.apply_brightness()
-                page.apply_direction()
+                assert not hasattr(page, "direction_dialog")
                 assert len(calls) == count
                 QTimer.singleShot(10, release.set)
                 settle(page)

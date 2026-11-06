@@ -4,13 +4,14 @@
 Принцип: рабочие функции работают, остальное показано как НЕДОСТУПНОЕ с причиной (без муляжей управления).
   Работает (проверено на железе): загрузка GIF/MP4 на LCD.
   Режимы кулера и свой профиль: работа и изменение оборотов подтверждены владельцем; обратного чтения нет.
-  Поворот экрана: через публичный API ядра, 90°/270° экспериментальны.
+  Поворот экрана доступен через CLI.
   Яркость и вкл/выкл: через API ядра, с подтверждением записи во флеш.
   Часы: подтверждённый стиль 1, местное время перед отправкой, без автосинхронизации.
   Недоступно в GUI: другие режимы экрана, чтение RPM/температуры жидкости.
 """
 from copy import deepcopy
 from html import escape
+from fractions import Fraction
 import datetime
 import json
 import os
@@ -23,7 +24,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QPointF, QRectF
 from PySide6.QtGui import QColor, QPixmap, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (QApplication, QBoxLayout, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
-                               QDialog, QDialogButtonBox, QGridLayout, QToolTip, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+                               QGridLayout, QToolTip, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
                                QScrollArea, QSizePolicy, QStackedWidget, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
@@ -35,6 +36,7 @@ COOLING_TITLES = {"silent": "Тихий", "balance": "Сбалансирован
 OK, BAD, WARN = (theme.COLORS[key] for key in ("good", "error", "warning"))
 
 STYLE = theme.build_qss()
+UI_DEFAULT_SETTINGS = dict(core.DEFAULT_SETTINGS, fps="60", max_seconds=15, background="black")
 
 
 def badge(text, color):
@@ -69,8 +71,10 @@ def load_ui_settings():
             settings["first_run_done"] = True
     except (OSError, ValueError, AttributeError):
         pass
-    if isinstance(saved, dict) and "fps" not in saved:
-        settings["fps"] = "60"
+    if isinstance(saved, dict):
+        for key, value in UI_DEFAULT_SETTINGS.items():
+            if key not in saved:
+                settings[key] = value
     return settings
 
 
@@ -294,7 +298,7 @@ class LcdPage(QWidget):
         self.preview_stack.setFixedSize(168, 224)
         self.lbl_prev = QLabel("Выбери файл")
         self.lbl_prev.setObjectName("preview")
-        self.lbl_prev.setMinimumSize(168, 224)
+        self.lbl_prev.setFixedSize(168, 224)
         self.lbl_prev.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.clock_preview = QLabel("07\n24")
         self.clock_preview.setObjectName("clockPreview")
@@ -306,7 +310,6 @@ class LcdPage(QWidget):
         self.lbl_orientation = muted("")
         self.lbl_orientation.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_layout.addWidget(self.lbl_orientation)
-        self.lbl_device_orientation = muted("")
         preview_layout.addStretch()
         outer.addWidget(self.preview_box, 1)
         right = QVBoxLayout()
@@ -355,18 +358,6 @@ class LcdPage(QWidget):
         bg_row.addWidget(self.btn_bg)
         bg_row.addStretch()
         pl.addLayout(bg_row)
-        self.sld_x, self.sld_y = QSlider(Qt.Orientation.Horizontal), QSlider(Qt.Orientation.Horizontal)
-        self.crop_dialog = QDialog(self)
-        self.crop_dialog.setWindowTitle("Настроить обрезку")
-        crop = QFormLayout(self.crop_dialog)
-        crop.addRow(muted("Положение кадра в режиме «Заполнить». Предпросмотр обновляется при изменении."))
-        for slider, key, title in ((self.sld_x, "focus_x", "По горизонтали"), (self.sld_y, "focus_y", "По вертикали")):
-            slider.setRange(0, 100)
-            slider.setValue(int(float(self.s[key]) * 100))
-            crop.addRow(title, slider)
-        crop_close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        crop_close.rejected.connect(self.crop_dialog.reject)
-        crop.addRow(crop_close)
         # Подрезка остаётся локальной настройкой, редактора на главном экране нет.
         self.spn_trim = QSpinBox(self)
         self.spn_trim.setRange(0, 3)
@@ -379,6 +370,7 @@ class LcdPage(QWidget):
         self.spn_sec.setSingleStep(0.05)
         self.spn_sec.setDecimals(2)
         self.spn_sec.setSpecialValueText("весь GIF")
+        self.spn_sec.setToolTip("Максимальная длительность: короткий GIF не удлиняется.")
         self.spn_sec.setValue(float(self.s["max_seconds"] or 0))
         tiles = QHBoxLayout()
         self.lbl_full_gif = muted("весь GIF")
@@ -398,31 +390,7 @@ class LcdPage(QWidget):
                 tile_layout.addWidget(self.lbl_full_gif)
             tiles.addWidget(tile, 1)
         pl.addLayout(tiles)
-        pl.addWidget(muted("Проверено на этом экране: 60 кадров/с и 8,95 с. Дольше — на свой риск."))
-        links = QHBoxLayout()
-        self.btn_crop = QPushButton("Настроить обрезку")
-        self.btn_position = QPushButton("Положение экрана…")
-        for button in (self.btn_crop, self.btn_position):
-            button.setProperty("lcdLink", True)
-            links.addWidget(button)
-        links.addStretch()
-        pl.addLayout(links)
         pl.addStretch()
-        self.direction_dialog = QDialog(self)
-        self.direction_dialog.setWindowTitle("Положение экрана")
-        direction = QVBoxLayout(self.direction_dialog)
-        self.cmb_dir = QComboBox()
-        for deg in core.DIRECTIONS:
-            self.cmb_dir.addItem(f"{deg}°", deg)
-        self.cmb_dir.setCurrentIndex(max(0, self.cmb_dir.findData(int(self.s["device_direction"]))))
-        direction.addWidget(self.cmb_dir)
-        direction.addWidget(self.lbl_device_orientation)
-        direction.addWidget(muted("90°/270° не подтверждены на устройстве. После смены положения загрузи картинку заново."))
-        self.btn_dir = QPushButton("Применить")
-        direction.addWidget(self.btn_dir)
-        self.btn_dir.clicked.connect(self.apply_direction)
-        self.btn_crop.clicked.connect(self.crop_dialog.show)
-        self.btn_position.clicked.connect(self.direction_dialog.show)
         self.btn_send = QPushButton("Загрузить на экран")
         self.btn_send.setObjectName("primary")
         pl.addWidget(self.btn_send)
@@ -479,8 +447,6 @@ class LcdPage(QWidget):
         for widget in (self.cmb_scale, self.cmb_rot, self.cmb_bg):
             widget.currentIndexChanged.connect(self.changed)
         self.btn_bg.clicked.connect(self.pick_background)
-        for widget in (self.sld_x, self.sld_y):
-            widget.valueChanged.connect(self.changed)
         self.edt_fps.textChanged.connect(self.changed)
         self.spn_sec.valueChanged.connect(self.changed)
         self.spn_trim.valueChanged.connect(self.changed)
@@ -495,6 +461,7 @@ class LcdPage(QWidget):
         super().resizeEvent(event)
         width, height = (168, 224) if self.width() < 1100 else (core.W, core.H)
         self.preview_stack.setFixedSize(width, height)
+        self.lbl_prev.setFixedSize(width, height)
         self.scale_preview()
 
     def scale_preview(self):
@@ -595,10 +562,6 @@ class LcdPage(QWidget):
         self.lbl_brightness_status.setText(f"Отправка хостом: {value}%…")
         self.start_worker(core.build_brightness_plan(value), f"brightness:{value}", "brightness")
 
-    def toggle_advanced(self, expanded):
-        # Совместимый обработчик прежнего UI: обрезка теперь в диалоге.
-        self.crop_dialog.setVisible(expanded)
-
     def background_value(self):
         return self.custom_background if self.cmb_bg.currentData() == "custom" else self.cmb_bg.currentData()
 
@@ -613,8 +576,6 @@ class LcdPage(QWidget):
         self.lbl_orientation.setText("Примерный вид, стиль 1" if self.s["lcd_mode"] == "clock" else
                                      f"{core.W} × {core.H} · {Path(self.src).name if self.src else '—'}")
         self.lbl_orientation.setToolTip(f"Поворот картинки {self.s['rotate']}°")
-        self.lbl_device_orientation.setText(
-            f"Аппаратный поворот LCD: {self.s['device_direction']}° (локальная настройка; приём не подтверждён)")
 
     # --- настройки
     def fps_value(self):
@@ -627,8 +588,8 @@ class LcdPage(QWidget):
 
     def apply_enc(self):
         core.ENC.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
-                        scale=self.cmb_scale.currentData(), focus_x=self.sld_x.value() / 100.0,
-                        focus_y=self.sld_y.value() / 100.0, rotate=int(self.cmb_rot.currentData()),
+                        scale=self.cmb_scale.currentData(), focus_x=0.5,
+                        focus_y=0.5, rotate=int(self.cmb_rot.currentData()),
                         background=self.background_value(),
                         edge_trim=self.spn_trim.value())
 
@@ -639,13 +600,10 @@ class LcdPage(QWidget):
         color = QColor(self.background_value())
         self.bg_sample.setStyleSheet(f"background-color: {color.name()}; border: 1px solid {theme.COLORS['border']}; border-radius: {theme.RADII[0]}px;")
         self.bg_sample.setToolTip(self.background_value())
-        fill = self.cmb_scale.currentData() == "fill"
-        self.sld_x.setEnabled(fill)
-        self.sld_y.setEnabled(fill)
         try:
             self.s.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
-                          scale=self.cmb_scale.currentData(), focus_x=self.sld_x.value() / 100.0,
-                          focus_y=self.sld_y.value() / 100.0, with_select=True,
+                          scale=self.cmb_scale.currentData(), focus_x=0.5,
+                          focus_y=0.5, with_select=True,
                           rotate=int(self.cmb_rot.currentData()),
                           background=self.background_value(),
                           edge_trim=self.spn_trim.value())
@@ -653,7 +611,7 @@ class LcdPage(QWidget):
         except (core.S360Error, OSError):
             pass
         self.lbl_full_gif.setVisible(self.spn_sec.value() == 0 or
-                                     (self.source_duration is not None and abs(self.spn_sec.value() - self.source_duration) < 0.01))
+                                     (self.source_duration is not None and self.spn_sec.value() >= self.source_duration))
         self.bg_sample.setVisible(self.cmb_bg.currentData() == "custom")
         self.btn_bg.setVisible(self.cmb_bg.currentData() == "custom")
         self.timer.start(300)
@@ -697,7 +655,9 @@ class LcdPage(QWidget):
             self.apply_enc()
             png = Path(self.tmp.name) / "preview.png"
             core.preview_png(Path(self.src), png)
-            self.preview_pixmap = QPixmap(str(png))
+            # Загрузка байтов исключает возврат старого кадра из файлового кеша Qt.
+            self.preview_pixmap = QPixmap()
+            self.preview_pixmap.loadFromData(png.read_bytes())
             self.scale_preview()
         except (core.S360Error, OSError) as e:
             self.lbl_prev.setText("нет предпросмотра")
@@ -723,16 +683,12 @@ class LcdPage(QWidget):
         self.clock_panel.setEnabled(False)
         for button in self.mode_buttons.values():
             button.setEnabled(False)
-        self.btn_dir.setEnabled(False)
-        self.cmb_dir.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.prog.setValue(0)
         self.log.appendPlainText(f"отправка ({kind}): {2 if kind == 'clock' else len(plan)} пакетов, {sha[:16]}")
         self.prog.show()
         self.log.show()
         self.btn_cancel.show()
-        self.crop_dialog.hide()
-        self.direction_dialog.hide()
         self.transfer_states[self.s["lcd_mode"]] = ("Отправка", "Хост отправляет; приём LCD не подтверждён")
         self.footer_changed.emit()
         self.worker = SendWorker(plan, True, sha, kind)
@@ -765,9 +721,12 @@ class LcdPage(QWidget):
             "НЕ эталонный файл: прошивка принимала файлы такого вида (baseline), но каждый новый — на твой риск"
         dur, frames, rate = core.probe_mp4(data)
         info = f"\nДлительность: {dur:.2f} с, кадров: {frames}, fps: {rate}" if dur is not None else ""
-        extra = ("\n\nЭти параметры не проверены на наших файлах (наблюдались до ~2,5 с при 20/3, 10, 15 fps "
-                 "и отдельный GIF 60 FPS / 8,95 с): возможно зависание картинки; "
-                 "восстановить можно через MSI Center.") if core.beyond_tested(dur, rate) else ""
+        try:
+            above_tested = (dur is not None and dur > 8.95) or (bool(rate) and Fraction(rate) > 60)
+        except (ValueError, ZeroDivisionError):
+            above_tested = dur is not None and dur > 8.95
+        extra = ("\n\nПараметры выше проверенного: 8,95 с / 60 кадров/с. Возможно зависание картинки; "
+                 "восстановить можно через MSI Center.") if above_tested else ""
         r = QMessageBox.question(
             self, "Подтверждение",
             f"Файл: {len(data)} байт{info}\nSHA256: {sha[:16]}…\n{ref}\n\nЭто ПЕРЕЗАПИШЕТ слот на экране "
@@ -778,25 +737,6 @@ class LcdPage(QWidget):
         plan = core.build_select_plan() + core.build_upload_plan(data, slot)
         self.pending_dir = None
         self.start_worker(plan, sha, "upload")
-
-    def apply_direction(self):
-        if self.worker is not None:
-            return
-        deg = int(self.cmb_dir.currentData())
-        if not self.confirm_previous():
-            return
-        r = QMessageBox.question(
-            self, "Поворот экрана (эксперимент)",
-            f"Поворот экрана {deg}°: команда, сохранение во флеш и повторный выбор слота S7.\n"
-            f"0°/180° подтверждены захватом; 90°/270° — только анализом DLL. "
-            f"Неизвестно, сохранится ли поворот после выключения. Вернуть можно командой на 0° или через MSI Center.\n"
-            f"Для 90°/270° файлы будут грузиться в слот R1 (по тому же анализу).\n"
-            "На время передачи драйвер HID временно отключится. Отправить?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        if r != QMessageBox.StandardButton.Yes:
-            return
-        self.pending_dir = deg
-        self.start_worker(core.build_direction_plan(deg), f"direction:{deg}", "direction")
 
     def cancel(self):
         if self.worker is not None:
@@ -817,8 +757,6 @@ class LcdPage(QWidget):
         self.clock_panel.setEnabled(True)
         for mode, button in self.mode_buttons.items():
             button.setEnabled(mode != "monitor")
-        self.btn_dir.setEnabled(True)
-        self.cmb_dir.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.hide()
         self.changed()
@@ -871,17 +809,21 @@ class LcdPage(QWidget):
 
 class CurveGraph(QWidget):
     changed = Signal(int, int, int)
+    selected = Signal()
 
     def __init__(self, channel):
         super().__init__()
         self.channel = channel
         self.values = {"temp": [0] * 4, "duty": [0] * 4}
         self.dragging = None
-        self.setMinimumSize(220, 200)
+        self.active_point = 0
+        self.compact = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMinimumSize(220, 150)
 
     def plot_rect(self):
         margin = self.fontMetrics().height()
-        return QRectF(36, margin + 12, self.width() - 52, self.height() - 3 * margin - 24)
+        return QRectF(36, margin + 12, self.width() - 52, self.height() - 2 * margin - 24)
 
     def point_position(self, index):
         r = self.plot_rect()
@@ -892,124 +834,141 @@ class CurveGraph(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = self.plot_rect()
-        if self.channel == "pump":
-            y = r.bottom() - core.PUMP_MIN_DUTY * r.height() / 100
-            p.fillRect(QRectF(r.left(), y, r.width(), r.bottom() - y), QColor("#292c33"))
-            p.setPen(QColor("#9aa3b2"))
-            p.drawText(QPointF(r.left() + 5, y + 16), "ниже 60% нельзя")
+        p.setPen(QColor(theme.COLORS["secondary"]))
+        p.drawText(QPointF(r.left(), self.fontMetrics().ascent()), "Мощность, %")
+        p.drawText(QPointF(r.right() - self.fontMetrics().horizontalAdvance("CPU, °C"),
+                          self.fontMetrics().ascent()), "CPU, °C")
         for value in (0, 25, 50, 75, 100):
             x = r.left() + value * r.width() / 100
             y = r.bottom() - value * r.height() / 100
-            p.setPen(QColor("#30343b"))
+            p.setPen(QColor(theme.COLORS["control"]))
             p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
             p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
-            p.setPen(QColor("#8b93a3"))
+            p.setPen(QColor(theme.COLORS["secondary"]))
             p.drawText(QPointF(x - 8, r.bottom() + 18), str(value))
-            if value in (0, 50, 100):
-                p.drawText(QPointF(4, y + 4), str(value))
-        p.drawText(QPointF(r.right() - 18, r.bottom() + 18 + self.fontMetrics().height()), "°C")
-        p.drawText(QPointF(4, self.fontMetrics().ascent()), "%")
-        p.setClipRect(r.adjusted(-6, -6, 6, 6))
-        p.setPen(QPen(QColor("#f06470"), 2.5))
+            p.drawText(QPointF(4, y + 4), str(value))
+        p.setClipRect(r.adjusted(-7, -7, 7, 7))
+        p.setPen(QPen(QColor(theme.COLORS["line"]), 1.5))
         points = [self.point_position(i) for i in range(4)]
-        p.drawPolyline(QPolygonF([QPointF(r.left(), points[0].y()), *points,
-                                 QPointF(r.right(), points[-1].y())]))
-        p.setBrush(QColor("#1a1d23"))
-        for point in points:
-            p.drawEllipse(point, 5, 5)
+        p.drawPolyline(QPolygonF(points))
+        p.setBrush(QColor(theme.COLORS["line"]))
+        for i, point in enumerate(points):
+            radius = (3.5 if i == self.active_point and self.hasFocus() else 2.5)
+            p.drawEllipse(point, radius, radius)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            was_compact = self.compact
+            self.selected.emit()
+            if was_compact:
+                return
+            self.setFocus()
             distances = [(self.point_position(i) - event.position()).manhattanLength() for i in range(4)]
             nearest = min(range(4), key=distances.__getitem__)
             if distances[nearest] <= 18:
-                self.dragging = nearest
+                self.dragging = self.active_point = nearest
+                self.update()
 
     def mouseMoveEvent(self, event):
         if self.dragging is None:
             return
         r = self.plot_rect()
         temp = round(max(0, min(100, (event.position().x() - r.left()) * 100 / r.width())))
-        duty = round(max(0, min(100, (r.bottom() - event.position().y()) * 100 / r.height())))
-        if self.channel == "pump":
-            duty = max(core.PUMP_MIN_DUTY, duty)
-        # Порядок соседних точек по-прежнему проверяет ядро.
+        duty = round(max(core.PUMP_MIN_DUTY if self.channel == "pump" else 0,
+                         min(100, (r.bottom() - event.position().y()) * 100 / r.height())))
         self.changed.emit(self.dragging, temp, duty)
-        QToolTip.showText(event.globalPosition().toPoint(), f"{temp}° · {duty}%", self)
+        i = self.dragging
+        QToolTip.showText(event.globalPosition().toPoint(),
+                          f'{self.values["temp"][i]}° · {self.values["duty"][i]}%', self)
 
     def mouseReleaseEvent(self, event):
         self.dragging = None
         QToolTip.hideText()
 
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            if self.compact:
+                self.selected.emit()
+                return
+            i = self.active_point
+            temp, duty = self.values["temp"][i], self.values["duty"][i]
+            temp += (event.key() == Qt.Key.Key_Right) - (event.key() == Qt.Key.Key_Left)
+            duty += (event.key() == Qt.Key.Key_Up) - (event.key() == Qt.Key.Key_Down)
+            self.changed.emit(i, temp, duty)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
 
 class CurveCard(QGroupBox):
     changed = Signal()
+    selected = Signal()
 
-    def __init__(self, channel, title, description):
+    def __init__(self, channel, title):
         super().__init__(title)
         self.channel = channel
+        self.setProperty("lcdCard", True)
         layout = QVBoxLayout(self)
-        layout.addWidget(muted(description))
         self.graph = CurveGraph(channel)
-        layout.addWidget(self.graph)
+        self.graph.selected.connect(self.selected)
+        layout.addWidget(self.graph, 1)
         self.chips_widget = QWidget()
         chips = QGridLayout(self.chips_widget)
         chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(8)
         self.chips = []
         for index in range(4):
-            button = QPushButton()
-            button.setStyleSheet("padding: 7px 5px;")
-            button.clicked.connect(lambda checked=False, i=index: self.edit_point(i))
-            chips.addWidget(button, index // 2, index % 2)
-            self.chips.append(button)
+            chips.addWidget(muted(f"Точка {index + 1}"), 0, index)
+            pair = QWidget()
+            row = QHBoxLayout(pair)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            inputs = {}
+            for key, suffix in (("temp", "°"), ("duty", "%")):
+                spin = QSpinBox()
+                spin.setRange(core.PUMP_MIN_DUTY if channel == "pump" and key == "duty" else 0, 100)
+                spin.setSuffix(suffix)
+                spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+                spin.setMinimumWidth(48)
+                spin.setAccessibleName(f"{title}, точка {index + 1}, {'температура' if key == 'temp' else 'мощность'}")
+                spin.setKeyboardTracking(False)
+                spin.setCorrectionMode(QSpinBox.CorrectionMode.CorrectToNearestValue)
+                spin.valueChanged.connect(lambda value, i=index, k=key: self.input_changed(i, k, value))
+                row.addWidget(spin)
+                inputs[key] = spin
+            chips.addWidget(pair, 1, index)
+            self.chips.append(inputs)
         layout.addWidget(self.chips_widget)
-        self.placeholder = muted("Кривую задаёт сама водянка — программа её не видит")
-        self.placeholder.setMinimumHeight(200)
-        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.placeholder)
         self.graph.changed.connect(self.move_point)
 
     def set_values(self, values):
         self.graph.values = deepcopy(values)
-        for i, chip in enumerate(self.chips):
-            chip.setText(f'{values["temp"][i]}° · {values["duty"][i]}%')
+        for i, inputs in enumerate(self.chips):
+            for key, spin in inputs.items():
+                spin.blockSignals(True)
+                spin.setValue(values[key][i])
+                spin.blockSignals(False)
         self.graph.update()
+
+    def input_changed(self, index, key, value):
+        temp, duty = self.graph.values["temp"][index], self.graph.values["duty"][index]
+        self.move_point(index, value if key == "temp" else temp, value if key == "duty" else duty)
 
     def move_point(self, index, temp, duty):
         values = deepcopy(self.graph.values)
+        t, d = values["temp"], values["duty"]
+        temp = max(t[index - 1] + 1 if index else 0,
+                   min(t[index + 1] - 1 if index < 3 else 100, temp))
+        duty = max(d[index - 1] if index else 0, core.PUMP_MIN_DUTY if self.channel == "pump" else 0,
+                   min(d[index + 1] if index < 3 else 100, duty))
         values["temp"][index], values["duty"][index] = temp, duty
         self.set_values(values)
         self.changed.emit()
 
-    def edit_point(self, index):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Изменить точку")
-        form = QFormLayout(dialog)
-        inputs = {}
-        for key, title in (("temp", "Температура, °C"), ("duty", "Обороты, %")):
-            spin = QSpinBox()
-            spin.setRange(-100000, 100000)
-            spin.setValue(self.graph.values[key][index])
-            form.addRow(title, spin)
-            inputs[key] = spin
-        if self.channel == "pump":
-            form.addRow("", muted("Минимум 60%; меньшее значение будет поднято до 60%."))
-        buttons = QDialogButtonBox()
-        buttons.addButton("Готово", QDialogButtonBox.ButtonRole.AcceptRole)
-        buttons.addButton("Отмена", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        form.addRow(buttons)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            duty = inputs["duty"].value()
-            if self.channel == "pump":
-                duty = max(core.PUMP_MIN_DUTY, duty)
-            self.move_point(index, inputs["temp"].value(), duty)
-
-    def set_custom(self, custom):
-        self.graph.setVisible(custom)
-        self.chips_widget.setVisible(custom)
-        self.placeholder.setVisible(not custom)
+    def set_compact(self, compact):
+        self.graph.compact = compact
+        self.graph.setMinimumHeight(120 if compact else 200)
+        self.chips_widget.setVisible(not compact)
 
 
 class CoolingPage(QWidget):
@@ -1025,12 +984,11 @@ class CoolingPage(QWidget):
         scroll.setWidget(self.content)
         page.addWidget(scroll)
         lay = QVBoxLayout(self.content)
-        lay.addWidget(QLabel("Охлаждение"))
         self.mode_row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.group = QButtonGroup(self)
         self.buttons = {}
-        for key, description in (("silent", "Тише всего"), ("balance", "На каждый день"),
-                                 ("game", "Максимум охлаждения"), ("custom", "Настрой сам")):
+        for key, description in (("silent", "Меньше шума"), ("balance", "Повседневная работа"),
+                                 ("game", "Больше охлаждения"), ("custom", "3 независимых канала")):
             b = QPushButton(f"{COOLING_TITLES[key]}\n{description}")
             b.setProperty("coolingCard", True)
             b.setCheckable(True)
@@ -1041,18 +999,34 @@ class CoolingPage(QWidget):
         lay.addLayout(self.mode_row)
         self.hint = muted("")
         lay.addWidget(self.hint)
+        self.preset_box = QGroupBox()
+        preset = QVBoxLayout(self.preset_box)
+        self.preset_title = QLabel()
+        preset.addWidget(self.preset_title)
+        preset.addWidget(muted("Встроенный режим охлаждения"))
+        preset_body = QHBoxLayout()
+        preset_body.addWidget(muted("Вентилятор радиатора     —\n\nВентилятор водоблока     —\n\nПомпа     —"), 1)
+        preset_body.addWidget(muted("Кривые встроенного режима недоступны для чтения.\n"
+                                   "Для редактирования выбери «Свой профиль»."), 1)
+        preset.addLayout(preset_body, 1)
+        self.preset_box.setMinimumHeight(300)
+        lay.addWidget(self.preset_box)
+        self.component_tabs = QTabBar()
+        for title in ("Радиатор", "Водоблок", "Помпа"):
+            self.component_tabs.addTab(title)
+        lay.addWidget(self.component_tabs)
         self.curves_box = QWidget()
-        self.cards_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, self.curves_box)
+        self.cards_layout = QGridLayout(self.curves_box)
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
         self.cards = {}
-        for channel, title, description in (
-                ("radiator1", "Вентилятор радиатора", "Все три вентилятора вместе"),
-                ("waterblock", "Вентилятор водоблока", "Маленький вентилятор на помпе"),
-                ("pump", "Помпа", "Минимум 60% — защита процессора")):
-            card = CurveCard(channel, title, description)
+        self.active_channel = "radiator1"
+        for channel, title in (("radiator1", "Вентилятор радиатора"),
+                               ("waterblock", "Вентилятор водоблока"), ("pump", "Помпа")):
+            card = CurveCard(channel, title)
             self.cards[channel] = card
-            self.cards_layout.addWidget(card, 1)
             card.changed.connect(self.update_dirty)
+            card.selected.connect(lambda ch=channel: self.select_component(ch))
+        self.component_tabs.currentChanged.connect(lambda i: self.select_component(tuple(self.cards)[i]))
         lay.addWidget(self.curves_box)
         self.curves_status = muted("")
         try:
@@ -1083,8 +1057,8 @@ class CoolingPage(QWidget):
         lay.addLayout(actions)
         self.btn_details = QToolButton()
         self.btn_details.setText("Подробности")
+        self.btn_details.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.btn_details.setCheckable(True)
-        self.btn_details.setArrowType(Qt.ArrowType.RightArrow)
         lay.addWidget(self.btn_details)
         self.details = QWidget()
         dl = QVBoxLayout(self.details)
@@ -1121,25 +1095,48 @@ class CoolingPage(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        narrow = self.width() < 960
-        direction = QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
-        self.cards_layout.setDirection(direction)
-        self.mode_row.setDirection(QBoxLayout.Direction.TopToBottom if self.width() < 700
-                                   else QBoxLayout.Direction.LeftToRight)
+        self.layout_components()
+
+    def select_component(self, channel):
+        self.active_channel = channel
+        self.component_tabs.blockSignals(True)
+        self.component_tabs.setCurrentIndex(tuple(self.cards).index(channel))
+        self.component_tabs.blockSignals(False)
+        self.layout_components()
+
+    def layout_components(self):
+        narrow = self.window().width() < 1100
+        custom = self.mode() == "custom"
+        self.component_tabs.setVisible(narrow and custom)
+        for card in self.cards.values():
+            self.cards_layout.removeWidget(card)
+        small_row = 0
+        for channel, card in self.cards.items():
+            active = channel == self.active_channel
+            card.set_compact(not active)
+            card.setVisible(custom and (active or not narrow))
+            if active:
+                self.cards_layout.addWidget(card, 0, 0, 2, 1)
+            else:
+                self.cards_layout.addWidget(card, small_row, 1)
+                small_row += 1
+        self.cards_layout.setColumnStretch(0, 2)
+        self.cards_layout.setColumnStretch(1, 0 if narrow else 1)
 
     def show_details(self, checked):
         self.details.setVisible(checked)
-        self.btn_details.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
 
     def mode(self):
         return next((key for key, b in self.buttons.items() if b.isChecked()), "balance")
 
     def mode_changed(self):
         custom = self.mode() == "custom"
-        for card in self.cards.values():
-            card.set_custom(custom)
-        self.hint.setText("Тяни точки на графике или нажми на значение под ним и введи число."
-                          if custom else "Готовый режим производителя. Для изменения выбери «Свой профиль».")
+        self.curves_box.setVisible(custom)
+        self.preset_box.setVisible(not custom)
+        self.preset_title.setText(COOLING_TITLES[self.mode()])
+        self.hint.setText("Выбери компонент. Точки можно перетаскивать или вводить числом." if custom else "")
+        self.hint.setVisible(custom)
+        self.layout_components()
         self.btn_reset_curves.setEnabled(custom)
         self.update_dirty()
 
@@ -1386,7 +1383,7 @@ class SettingsPage(QWidget):
 
     def reset(self):
         try:
-            core.save_settings(core.DEFAULT_SETTINGS)
+            save_ui_settings(UI_DEFAULT_SETTINGS)
         except OSError as e:
             QMessageBox.warning(self, "Настройки не сброшены", str(e))
             return
@@ -1396,6 +1393,7 @@ class SettingsPage(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        theme.install_russian_translation(QApplication.instance())
         self.setWindowTitle("S360 Control")
         self.resize(1040, 720)
         settings = load_ui_settings()
@@ -1441,9 +1439,9 @@ class MainWindow(QMainWindow):
         self.tabs.setDrawBase(False)
         for name, page in self.pages:
             self.tabs.addTab(name)
-            # LCD уже содержит собственную прокрутку; остальные старые страницы
+            # LCD и охлаждение содержат собственную прокрутку; остальные страницы
             # прокручиваются внутри каркаса, не затрагивая нижнюю полосу.
-            if isinstance(page, LcdPage):
+            if isinstance(page, (LcdPage, CoolingPage)):
                 self.stack.addWidget(page)
             else:
                 scroll = QScrollArea()
