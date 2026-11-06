@@ -128,7 +128,7 @@ def main():
                 assert not page.mode_buttons["media"].isEnabled()
                 page.apply_clock()
                 page.apply_brightness()
-                page.apply_direction()
+                assert not hasattr(page, "direction_dialog")
                 window.close()
                 assert window.isVisible() and warning.called  # закрытие во время записи запрещено
                 QTimer.singleShot(10, release.set)
