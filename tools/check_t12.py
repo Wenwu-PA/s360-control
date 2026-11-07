@@ -37,7 +37,7 @@ def main():
               patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question,
               patch.object(QMessageBox, "information") as information,
               patch.object(sys, "excepthook", side_effect=lambda *args: errors.append(args))):
-            assert len(theme.COLORS) == 15 and theme.COLORS["accent"] == "#B72F3D"  # 1
+            assert len(theme.COLORS) == 16 and theme.COLORS["accent"] == "#B72F3D"  # 1
             assert theme.SPACING == (8, 16, 24, 32) and theme.RADII == (4, 8) and theme.BORDER_WIDTH == 1  # 2
             assert app.font().pixelSize() == 14 and all(c in gui.STYLE for c in theme.COLORS.values())  # 3
             window = gui.MainWindow()
@@ -45,7 +45,7 @@ def main():
             window.tick()
             window.show()
             app.processEvents()
-            assert isinstance(window.stack, QStackedWidget) and window.stack.count() == window.tabs.count() == 3  # 4
+            assert isinstance(window.stack, QStackedWidget) and window.stack.count() == window.tabs.count() == 4  # 4
             for index, (title, _) in enumerate(window.pages):
                 window.tabs.setCurrentIndex(index)
                 app.processEvents()
@@ -55,8 +55,9 @@ def main():
             assert window.tabs.currentIndex() == 0  # 5: оба направления навигации
             dashboard = window.dashboard
             lcd, cooling = window.pages[1][1], window.pages[2][1]
-            dashboard.btn_configure.click()
-            assert window.stack.currentIndex() == 1 and window.footer.isAncestorOf(dashboard.btn_configure)  # 6
+            assert not window.footer_stack.widget(0).findChildren(gui.QPushButton)
+            window.tabs.setCurrentIndex(1)
+            assert window.stack.currentIndex() == 1  # 6
             lcd.btn_send.click()
             assert information.called and window.footer.isAncestorOf(lcd.btn_send) and lcd.worker is None  # 7
             lcd.mode_buttons["clock"].click()

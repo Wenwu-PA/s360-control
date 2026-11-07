@@ -70,6 +70,7 @@ def main():
             window.show()
             app.processEvents()
             page = window.pages[1][1]
+            assert page.s["fps"] == "60" and page.s["max_seconds"] == 15 and page.background_value() == "black"
             assert (page.sld_brightness.minimum(), page.sld_brightness.maximum()) == (0, 100)
             assert page.chk_lcd.isChecked() and page.sld_brightness.value() == 100
             assert "не считано" in page.lbl_brightness_status.text()

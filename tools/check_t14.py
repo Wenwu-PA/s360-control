@@ -38,11 +38,11 @@ def main():
             window = gui.MainWindow()
             window.show(); window.stack.setCurrentIndex(1); app.processEvents()
             lcd = window.pages[1][1]
-            assert gui.load_ui_settings()["max_seconds"] == lcd.spn_sec.value() == 15
+            assert gui.load_ui_settings()["max_seconds"] == lcd.s["max_seconds"] == 15
             assert lcd.background_value() == "black"
             assert not any("Проверено на этом экране" in label.text() for label in lcd.findChildren(QLabel))
             assert not hasattr(lcd, "crop_dialog") and not hasattr(lcd, "direction_dialog")
-            assert set(lcd.mode_buttons) == {"media", "clock"} and lcd.edt_fps.text() == "60"
+            assert set(lcd.mode_buttons) == {"media", "clock"} and lcd.s["fps"] == "60"
             assert not hasattr(lcd, "advanced") and not hasattr(lcd, "chk_detach") and not hasattr(lcd, "chk_select")
             assert lcd.prog.isHidden() and lcd.log.isHidden() and lcd.btn_brightness.isHidden()  # 1
             with patch.object(lcd, "start_worker", side_effect=forbidden):
@@ -71,13 +71,9 @@ def main():
                   patch.object(lcd, "update_preview")):
                 lcd.btn_pick.click()
             assert lcd.lbl_file_details.text() == "500×400 · 8,95 с" and lcd.s["max_seconds"] == 15
-            assert not lcd.lbl_full_gif.isHidden() and "globe.gif" in lcd.lbl_file.text()  # 5
-            lcd.spn_sec.setValue(3)
-            assert lcd.lbl_full_gif.isHidden() and lcd.s["max_seconds"] == 3
-            lcd.spn_sec.setValue(8.95)
-            assert not lcd.lbl_full_gif.isHidden()
-            lcd.spn_sec.setValue(0)
+            assert "globe.gif" in lcd.lbl_file.text() and not hasattr(lcd, "spn_sec")  # 5
             lcd.apply_enc()
+            assert core.ENC["max_seconds"] == 15 and core.ENC["fps"] == "60"
             assert core.ENC["focus_x"] == core.ENC["focus_y"] == .5  # 6
             lcd.s["with_select"] = False
             with (patch.object(core, "load_media", return_value=b"prepared"),
@@ -121,8 +117,8 @@ def main():
             saved.update(max_seconds=None, background="white", focus_x=.23, focus_y=.78)
             gui.save_ui_settings(saved)
             restored = gui.LcdPage(gui.load_ui_settings())
-            assert restored.edt_fps.text() == "20/3" and restored.spn_trim.value() == 2 and restored.spn_trim.isHidden()
-            assert restored.spn_sec.value() == 0 and restored.background_value() == "white"
+            assert restored.s["fps"] == "60" and restored.spn_trim.value() == 2 and restored.spn_trim.isHidden()
+            assert restored.s["max_seconds"] == 15 and restored.background_value() == "black"
             restored.apply_enc()
             assert core.ENC["focus_x"] == core.ENC["focus_y"] == .5
             restored.timer.stop(); restored.close()  # 9
@@ -156,14 +152,11 @@ def main():
                 assert [message.button(getattr(QMessageBox.StandardButton, name)).text().replace("&", "")
                         for name in ("Yes", "No", "Cancel", "Close")] == ["Да", "Нет", "Отмена", "Закрыть"]
                 message.close()
-            with patch.object(QMessageBox, "information"):
-                window.pages[0][1].widget(2).reset()
-            assert gui.load_ui_settings() == gui.UI_DEFAULT_SETTINGS
 
         from check_t3 import check_rotation
         check_rotation(app, lcd, core, tmp)
         lcd.timer.stop()
-        print("T14 ok: 10 проверок; режимы, явное применение, подтверждения, метаданные, плитки, русские кнопки, сохранение, поворот кадров; отправок нет")
+        print("T14 ok: 10 проверок; режимы, явное применение, подтверждения, метаданные, фиксированные параметры, русские кнопки, сохранение, поворот кадров; отправок нет")
 
 
 if __name__ == "__main__":

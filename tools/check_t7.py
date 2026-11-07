@@ -85,6 +85,7 @@ def main():
             app.processEvents()
             window.stack.setCurrentIndex(1)
             page = window.pages[1][1]
+            assert page.s["fps"] == "60" and page.s["max_seconds"] == 15 and page.background_value() == "black"
             assert page.s["lcd_mode"] == "media" and page.clock_panel.isHidden()
             page.mode_buttons["clock"].click()
             assert page.mode_buttons["clock"].isChecked() and not page.clock_panel.isHidden()

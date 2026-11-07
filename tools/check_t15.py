@@ -34,7 +34,7 @@ def check_visible_text(app, window, page, background):
         for y in range(round(rect.top() * ratio), round((rect.bottom() + 1) * ratio)):
             for x in range(round(rect.left() * ratio), round((rect.right() + 1) * ratio)):
                 value = luminance(image.pixelColor(x, y))
-                light += (value > bg and (value + .05) / (bg + .05) >= 4.5
+                light += ((max(value, bg) + .05) / (min(value, bg) + .05) >= 4.5
                           and image.pixelColor(x, y) != empty.pixelColor(x, y))
         assert light >= 12, (spin.accessibleName(), spin.size(), rect, light)
 
@@ -179,7 +179,9 @@ def main():
             assert not any(label.text() == 'Охлаждение' for label in page.findChildren(QLabel))
             assert not hasattr(page, 'btn_details') and not hasattr(page, 'details') and not hasattr(page, 'chk_auto')
             assert page.btn_reset_curves.text() == 'Сбросить до стандартных'
-            check_visible_text(app, window, page, gui.theme.COLORS['control'])
+            for name in ('dark', 'light', 'oled'):
+                window.pages[3][1].theme_buttons[name].click()
+                check_visible_text(app, window, page, gui.theme.COLORS['control'])
             assert not errors and not core.STATE.exists()
             window.close()
             app.processEvents()  # 10: служебные действия доступны, лишние элементы убраны

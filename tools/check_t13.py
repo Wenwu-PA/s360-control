@@ -66,10 +66,10 @@ def main():
                 assert window.overview_state == "overview" and window.dashboard.cpu.text() == "48 °C"  # 8
                 gui.save_ui_settings(window.settings)
                 restored = gui.MainWindow()
-                assert restored.overview_state == "overview" and restored.dashboard.last_file.text() == "—"  # 9
+                assert restored.overview_state == "overview" and restored.dashboard.last_file.text() == "Изображение ещё не отправлялось"  # 9
                 with patch.object(core, "read_cpu_temp", side_effect=core.S360Error("нет датчика")):
                     window.tick()
-                assert window.dashboard.cpu.text() == "—" and not core.STATE.exists() and not errors
+                assert window.dashboard.cpu.text() == "Датчик недоступен" and not core.STATE.exists() and not errors
                 restored.close(); window.close(); app.processEvents()  # 10
         print("T13 ok: 10 проверок; права без открытия, состояния, повторная проверка, первый запуск и сохранение; отправок нет")
 

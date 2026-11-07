@@ -64,10 +64,7 @@ def check_rotation(app, lcd, core, tmp):
                 got = image.pixelColor(x, y).getRgb()[:3]
                 assert max(abs(a - b) for a, b in zip(got, want)) < 35, (angle, scale, frame, x, y, got, want)
 
-    lcd.cmb_bg.setCurrentIndex(lcd.cmb_bg.findData("black"))
     lcd.spn_trim.setValue(0)
-    lcd.edt_fps.setText("5")
-    lcd.spn_sec.setValue(15)  # Лимит не удлиняет короткий GIF/MP4.
     lcd.s["device_direction"] = 180
     frame_size = lcd.preview_stack.size()
     assert frame_size.width() * 4 == frame_size.height() * 3
@@ -122,11 +119,11 @@ def check_rotation(app, lcd, core, tmp):
                         "ffmpeg", "-v", "error", "-i", str(prepared), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                         timeout=30)
                     size = 240 * 320 * 3
-                    assert len(raw) == 2 * size
-                    for frame in range(2):
+                    assert len(raw) == 24 * size  # 0,4 с при фиксированных 60 кадрах/с.
+                    for frame in range(24):
                         image = QImage(raw[frame * size:(frame + 1) * size], 240, 320, 240 * 3,
                                        QImage.Format.Format_RGB888)
-                        verify(image.transformed(QTransform().rotate(position)), angle, scale, fx, fy, frame)
+                        verify(image.transformed(QTransform().rotate(position)), angle, scale, fx, fy, frame // 12)
     lcd.position_buttons[0].click()
     lcd.src = None
 
@@ -137,8 +134,7 @@ def main():
         os.environ["XDG_STATE_HOME"] = str(Path(tmp) / "state")
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from PySide6.QtCore import QTimer
-        from PySide6.QtGui import QColor
-        from PySide6.QtWidgets import QApplication, QColorDialog, QPushButton
+        from PySide6.QtWidgets import QApplication, QPushButton
         import s360_gui as gui
         # Проверки прежних экранов: состояние подключения изолировано от хоста.
         patch.object(gui, "device_access", return_value="ready").start()
@@ -151,8 +147,8 @@ def main():
         window.show()
         app.processEvents()
         lcd = window.pages[1][1]
-        assert window.stack.count() == 3
-        assert lcd.s == gui.UI_DEFAULT_SETTINGS
+        assert window.stack.count() == 4
+        assert all(lcd.s[k] == v for k, v in gui.UI_DEFAULT_SETTINGS.items())
         assert lcd.worker is None
         assert not hasattr(lcd, "chk_detach") and not hasattr(lcd, "chk_select")
         assert not hasattr(lcd, "crop_dialog") and not hasattr(lcd, "direction_dialog")
@@ -166,36 +162,22 @@ def main():
             lcd.cmb_scale.setCurrentIndex(lcd.cmb_scale.findData(scale))
             lcd.apply_enc()
             assert core.ENC["focus_x"] == core.ENC["focus_y"] == 0.5
-        for background in ("white", "black", "custom"):
-            lcd.cmb_bg.setCurrentIndex(lcd.cmb_bg.findData(background))
-            assert lcd.btn_bg.isEnabled() == (background == "custom")
-
-        def close_color_dialog(accept):
-            dialog = next(w for w in app.topLevelWidgets() if isinstance(w, QColorDialog))
-            dialog.setCurrentColor(QColor("#123456" if accept else "#abcdef"))
-            dialog.accept() if accept else dialog.reject()
-
-        QTimer.singleShot(0, lambda: close_color_dialog(True))
-        lcd.btn_bg.click()
-        assert lcd.background_value() == "#123456"
-        assert lcd.bg_sample.toolTip() == "#123456"
-        QTimer.singleShot(0, lambda: close_color_dialog(False))
-        lcd.btn_bg.click()
-        assert lcd.background_value() == "#123456"
+        assert lcd.background_value() == "black"
+        assert not hasattr(lcd, "cmb_bg") and not hasattr(lcd, "edt_fps") and not hasattr(lcd, "spn_sec")
         lcd.position_buttons[90].click()
         lcd.apply_enc()
         saved = core.load_settings()
-        assert saved["background"] == core.ENC["background"] == "#123456"
+        assert saved["background"] == core.ENC["background"] == "black"
         assert saved["focus_x"] == saved["focus_y"] == 0.5
         assert saved["rotate"] == core.ENC["rotate"] == 0
         assert saved["last_file"] is None and saved["last_upload_time"] is None
-        # Старое именованное значение цвета сохраняется при открытии новой страницы.
+        # Старое значение цвета игнорируется при открытии новой страницы.
         saved["background"] = "gray"
         saved["device_direction"] = 180
         saved["rotate"] = 270
         core.save_settings(saved)
         restored = gui.LcdPage(gui.load_ui_settings())
-        assert restored.background_value() == "gray"
+        assert restored.background_value() == "black"
         restored.apply_enc()
         assert restored.s["rotate"] == core.ENC["rotate"] == 0
         assert restored.lbl_orientation.text() == "320 × 240 · положение 90°"
@@ -216,7 +198,7 @@ def main():
         assert app.exec() == 0
         assert not window.isVisible()
         detail = "проверка кадров пропущена (--skip-rotation)" if "--skip-rotation" in sys.argv else "GIF/MP4: четыре угла, подписи, кадры, fit/fill/stretch"
-        print(f"T3 ok: Qt, вкладки, режимы, цвет, настройки; {detail}; отправок нет")
+        print(f"T3 ok: Qt, вкладки, режимы, чёрный фон, настройки; {detail}; отправок нет")
 
 
 if __name__ == "__main__":
