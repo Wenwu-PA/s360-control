@@ -51,7 +51,7 @@ def main():
                 lcd.btn_brightness.click()
                 assert "42%" in question.call_args.args[2] and lcd.pending_brightness is None  # 2
             lcd.mode_buttons["clock"].click()
-            assert lcd.preview_stack.currentIndex() == 1 and "Примерный вид, стиль 1" in lcd.lbl_orientation.text()
+            assert lcd.preview_stack.currentIndex() == 1 and lcd.lbl_orientation.text() == "240 × 320 · положение 0°"
             assert "из системы · UTC" in lcd.lbl_clock_time.text()
             assert "Не отправлено" in window.lcd_badge.text() and "при отправке" in window.lcd_status.text()  # 3
             with patch.object(lcd, "start_worker") as start:
@@ -71,7 +71,7 @@ def main():
                   patch.object(lcd, "update_preview")):
                 lcd.btn_pick.click()
             assert lcd.lbl_file_details.text() == "500×400 · 8,95 с" and lcd.s["max_seconds"] == 15
-            assert not lcd.lbl_full_gif.isHidden() and "globe.gif" in lcd.lbl_orientation.text()  # 5
+            assert not lcd.lbl_full_gif.isHidden() and "globe.gif" in lcd.lbl_file.text()  # 5
             lcd.spn_sec.setValue(3)
             assert lcd.lbl_full_gif.isHidden() and lcd.s["max_seconds"] == 3
             lcd.spn_sec.setValue(8.95)

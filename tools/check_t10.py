@@ -63,7 +63,10 @@ def main():
             assert window.isVisible() and not errors  # 1: запуск настоящего GUI
             assert tuple(page.cards) == ('radiator1', 'waterblock', 'pump')
             assert not page.preset_box.isHidden() and page.curves_box.isHidden()  # 2
+            assert not hasattr(page, 'details') and not hasattr(page, 'chk_auto')
+            assert page.btn_reset_curves.isHidden()
             page.buttons['custom'].click()
+            assert not page.btn_reset_curves.isHidden()
             page.apply()
             assert not calls and 'Сохранить' in warning.call_args.args[2]  # 3: нет файла — нет запуска
             page.save_curves()
@@ -113,7 +116,9 @@ def main():
                 page.refresh()
                 expected = {'activating': 'Запускается', 'failed': 'Последняя ошибка из журнала',
                             'auto-restart': 'Последняя ошибка из журнала', 'inactive': 'остановлена', 'unknown': 'неизвестен'}[state]
-                assert expected in page.status.text()  # 8: честные статусы
+                assert expected in page.status.text() and page.btn_service.isHidden()  # 8
+                if state in ('failed', 'auto-restart'):
+                    assert './install.sh' in page.status.text()
             core.CURVES_FILE.write_text('{broken')
             before = len(calls)
             page.apply()

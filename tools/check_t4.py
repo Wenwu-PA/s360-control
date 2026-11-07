@@ -73,7 +73,7 @@ def main():
                 app.processEvents()
             assert page.mode() == "balance"
             assert not page.btn_apply.isEnabled() and not page.btn_service.isEnabled()
-            assert not page.chk_auto.isEnabled() and "не установлен" in page.status.text()
+            assert not hasattr(page, "chk_auto") and "не установлен" in page.status.text()
             assert not calls and not core.COOLING_ENV.exists()
 
             installed = True
@@ -94,35 +94,23 @@ def main():
                 assert core.load_settings()["cooling_mode"] == mode
                 assert page.btn_service.isEnabled()
                 assert "не подтверждён" in page.status.text()
-            # Сохранённый выбор не выдаётся за прочитанный режим устройства.
-            assert "нет данных" in page.last_mode.text()
-            core.COOLING_STATE.parent.mkdir(parents=True, exist_ok=True)
-            core.COOLING_STATE.write_text(json.dumps({"mode": "silent"}))
+            assert not hasattr(page, "last_mode") and not hasattr(page, "details")
             page.refresh()
-            assert "Тихий" in page.last_mode.text() and page.mode() == "game"
-            core.COOLING_STATE.write_text("invalid json")
-            page.refresh()
-            assert "нет данных" in page.last_mode.text()
-
+            assert enabled and calls[-2:] == ["enable", "restart"]
             page.btn_service.click()
-            assert calls[-1] == "stop" and not page.btn_service.isEnabled()
+            assert calls[-2:] == ["stop", "disable"] and not enabled and page.btn_service.isHidden()
             page.btn_apply.click()
-            assert calls[-1] == "restart" and page.btn_service.isEnabled()
-            assert page.chk_auto.isChecked() and enabled
-            for expected in (False, True):
-                before = len(calls)
-                page.chk_auto.click()
-                page.refresh()
-                assert len(calls) == before and enabled != expected
-                assert page.chk_auto.isChecked() == expected
-                page.btn_apply.click()
-                assert enabled == expected and calls[-2:] == ["enable" if expected else "disable", "restart"]
-            page.chk_auto.click()
-            page.btn_apply.click()
+            assert calls[-2:] == ["enable", "restart"] and enabled and not page.btn_service.isHidden()
+            # Ошибка enable блокирует запуск; ошибка disable видна после остановки.
+            fail_command = "disable"
+            page.btn_service.click()
+            assert warning.call_args.args[1] == "Ошибка" and page.btn_service.isHidden()
             fail_command = "enable"
-            page.chk_auto.click()
+            before = len(calls)
             page.btn_apply.click()
-            assert not enabled and page.chk_auto.isChecked() and warning.call_args.args[1] == "Ошибка"
+            assert calls[before:] == ["enable"] and warning.call_args.args[1] == "Ошибка"
+            fail_command = None
+            page.btn_apply.click()
             fail_command = "stop"
             page.btn_service.click()
             assert page.btn_service.isEnabled()

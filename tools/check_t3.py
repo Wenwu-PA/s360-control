@@ -22,6 +22,7 @@ def check_rotation(app, lcd, core, tmp):
     from PySide6.QtGui import QColor, QImage, QTransform
 
     lcd.select_mode("media")
+    lcd.position_buttons[0].click()
     colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
     for frame in range(2):
         image = QImage(320, 160, QImage.Format.Format_RGB32)
@@ -83,15 +84,14 @@ def check_rotation(app, lcd, core, tmp):
           patch.object(core, "load_media", side_effect=capture_media) as load):
         for src in (gif, mp4):
             lcd.src = str(src)
-            for position, angle in ((0, 0), (0, 90), (0, 180), (0, 270), (90, 90), (180, 90), (270, 90)):
+            for position, angle in ((0, 0), (90, 0), (180, 0), (270, 0)):
                 lcd.position_buttons[position].click()
                 frame_size = lcd.preview_stack.size()
                 assert frame_size.width() * (3 if position in (90, 270) else 4) == frame_size.height() * (4 if position in (90, 270) else 3)
                 assert f"положение {position}°" in lcd.lbl_orientation.text()
                 assert lcd.s["screen_pos"] == core.load_settings()["screen_pos"] == position
-                lcd.cmb_rot.setCurrentIndex(lcd.cmb_rot.findData(angle))
-                assert f"поворот картинки {angle}°" in lcd.lbl_orientation.text()
-                assert lcd.lbl_orientation.toolTip() == f"Поворот картинки {angle}°"
+                assert not hasattr(lcd, "cmb_rot")
+                assert "поворот картинки" not in lcd.lbl_orientation.text().lower()
                 assert lcd.s["device_direction"] == 180
                 for scale in ("fit", "stretch", "fill"):
                     lcd.cmb_scale.setCurrentIndex(lcd.cmb_scale.findData(scale))
@@ -182,19 +182,23 @@ def main():
         QTimer.singleShot(0, lambda: close_color_dialog(False))
         lcd.btn_bg.click()
         assert lcd.background_value() == "#123456"
-        lcd.cmb_rot.setCurrentIndex(lcd.cmb_rot.findData(90))
+        lcd.position_buttons[90].click()
         lcd.apply_enc()
         saved = core.load_settings()
         assert saved["background"] == core.ENC["background"] == "#123456"
         assert saved["focus_x"] == saved["focus_y"] == 0.5
-        assert saved["rotate"] == core.ENC["rotate"] == 90
+        assert saved["rotate"] == core.ENC["rotate"] == 0
         assert saved["last_file"] is None and saved["last_upload_time"] is None
         # Старое именованное значение цвета сохраняется при открытии новой страницы.
         saved["background"] = "gray"
         saved["device_direction"] = 180
-        restored = gui.LcdPage(saved)
+        saved["rotate"] = 270
+        core.save_settings(saved)
+        restored = gui.LcdPage(gui.load_ui_settings())
         assert restored.background_value() == "gray"
-        assert restored.lbl_orientation.toolTip() == "Поворот картинки 90°"
+        restored.apply_enc()
+        assert restored.s["rotate"] == core.ENC["rotate"] == 0
+        assert restored.lbl_orientation.text() == "320 × 240 · положение 90°"
         assert restored.s["device_direction"] == 180
         restored.timer.stop()
         restored.close()

@@ -113,7 +113,7 @@ def main():
             assert "не подтверждён" in page.status.text()
             page.btn_service.click()
             page.btn_apply.click()
-            assert calls[-3:] == ["stop", "enable", "restart"]
+            assert calls[-4:] == ["stop", "disable", "enable", "restart"]
             restored = gui.CoolingPage(core.load_settings())
             assert restored.mode() == "custom" and not restored.curves_box.isHidden()
             restored.close()
@@ -126,7 +126,7 @@ def main():
             assert "Ошибка сервиса" in page.status.text()
             connected = False
             page.refresh()
-            assert "не найден" in page.cooler_connection.text()
+            assert not hasattr(page, "cooler_connection")
             count = len(calls)
             page.btn_apply.click()
             assert len(calls) == count and warning.call_args.args[1] == "Устройство не найдено"

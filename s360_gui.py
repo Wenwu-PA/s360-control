@@ -75,6 +75,7 @@ def load_ui_settings():
         for key, value in UI_DEFAULT_SETTINGS.items():
             if key not in saved:
                 settings[key] = value
+    settings["rotate"] = 0
     return settings
 
 
@@ -231,6 +232,7 @@ class LcdPage(QWidget):
     def __init__(self, settings):
         super().__init__()
         self.s = settings
+        self.s["rotate"] = 0
         self.src = None
         self.source_duration = None
         self.pending_file = self.pending_brightness = self.pending_clock = self.pending_dir = None
@@ -336,17 +338,13 @@ class LcdPage(QWidget):
         for title, key in (("Заполнить", "fill"), ("Вписать", "fit"), ("Растянуть", "stretch")):
             self.cmb_scale.addItem(title, key)
         self.cmb_scale.setCurrentIndex(max(0, self.cmb_scale.findData(self.s["scale"])))
-        self.cmb_rot = QComboBox()
-        for deg in (0, 90, 180, 270):
-            self.cmb_rot.addItem(f"{deg}°", deg)
-        self.cmb_rot.setCurrentIndex(max(0, self.cmb_rot.findData(int(self.s["rotate"]))))
         self.cmb_bg = QComboBox()
         for title, key in (("Чёрный", "black"), ("Белый", "white"), ("Свой цвет", "custom")):
             self.cmb_bg.addItem(title, key)
         background = str(self.s["background"])
         self.custom_background = background if background not in ("black", "white") else "#808080"
         self.cmb_bg.setCurrentIndex(max(0, self.cmb_bg.findData(background if background in ("black", "white") else "custom")))
-        for col, (title, widget) in enumerate((("Масштаб", self.cmb_scale), ("Поворот картинки", self.cmb_rot), ("Фон прозрачности", self.cmb_bg))):
+        for col, (title, widget) in enumerate((("Масштаб", self.cmb_scale), ("Фон прозрачности", self.cmb_bg))):
             controls.addWidget(muted(title), 0, col)
             controls.addWidget(widget, 1, col)
         pl.addLayout(controls)
@@ -460,7 +458,7 @@ class LcdPage(QWidget):
         self.btn_pick.clicked.connect(self.pick)
         self.btn_send.clicked.connect(self.send)
         self.btn_cancel.clicked.connect(self.cancel)
-        for widget in (self.cmb_scale, self.cmb_rot, self.cmb_bg):
+        for widget in (self.cmb_scale, self.cmb_bg):
             widget.currentIndexChanged.connect(self.changed)
         self.btn_bg.clicked.connect(self.pick_background)
         self.edt_fps.textChanged.connect(self.changed)
@@ -600,12 +598,10 @@ class LcdPage(QWidget):
     def update_orientation(self):
         position = int(self.s["screen_pos"])
         width, height = (core.H, core.W) if position in (90, 270) else (core.W, core.H)
-        caption = f"{width} × {height} · положение {position}° · поворот картинки {self.s['rotate']}°"
-        self.lbl_orientation.setText(caption + (" · Примерный вид, стиль 1" if self.s["lcd_mode"] == "clock" else
-                                              f" · {Path(self.src).name if self.src else 'файл не выбран'}"))
+        self.lbl_orientation.setText(f"{width} × {height} · положение {position}°")
+        self.lbl_orientation.setToolTip("")
         self.lbl_clock_position.setVisible(position != 0)
         self.resize_preview()
-        self.lbl_orientation.setToolTip(f"Поворот картинки {self.s['rotate']}°")
 
     # --- настройки
     def fps_value(self):
@@ -619,12 +615,12 @@ class LcdPage(QWidget):
     def apply_enc(self):
         core.ENC.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
                         scale=self.cmb_scale.currentData(), focus_x=0.5,
-                        focus_y=0.5, rotate=int(self.cmb_rot.currentData()), orient=int(self.s["screen_pos"]),
+                        focus_y=0.5, rotate=0, orient=int(self.s["screen_pos"]),
                         background=self.background_value(),
                         edge_trim=self.spn_trim.value())
 
     def changed(self, *_):
-        self.s["rotate"] = int(self.cmb_rot.currentData())
+        self.s["rotate"] = 0
         self.update_orientation()
         self.btn_bg.setEnabled(self.cmb_bg.currentData() == "custom")
         color = QColor(self.background_value())
@@ -634,7 +630,7 @@ class LcdPage(QWidget):
             self.s.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
                           scale=self.cmb_scale.currentData(), focus_x=0.5,
                           focus_y=0.5, with_select=True,
-                          rotate=int(self.cmb_rot.currentData()),
+                          rotate=0,
                           background=self.background_value(),
                           edge_trim=self.spn_trim.value())
             save_ui_settings(self.s)
@@ -961,7 +957,10 @@ class CurveCard(QGroupBox):
                 spin.setRange(core.PUMP_MIN_DUTY if channel == "pump" and key == "duty" else 0, 100)
                 spin.setSuffix(suffix)
                 spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-                spin.setMinimumWidth(spin.fontMetrics().horizontalAdvance("100 °C") + 24)
+                text_width = spin.fontMetrics().horizontalAdvance("100 °C") + 16
+                spin.setMinimumWidth(text_width + 16)
+                # Qt/QSS с NoButtons может оставить внутреннему редактору ширину 1 px.
+                spin.lineEdit().setMinimumWidth(text_width)
                 spin.setStyleSheet(f"QSpinBox {{ color: {theme.COLORS['text']}; padding: 4px; }} "
                                   f"QSpinBox QLineEdit {{ color: {theme.COLORS['text']}; background: transparent; border: none; padding: 0; }}")
                 spin.setAccessibleName(f"{title}, точка {index + 1}, {'температура' if key == 'temp' else 'мощность'}")
@@ -1073,7 +1072,6 @@ class CoolingPage(QWidget):
                                        "Показан образец; исходный файл не изменён.")
         self.saved_curves = deepcopy(self.curves)
         self.saved_mode = self.mode()
-        self.cooler_connection = muted("")
         self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
@@ -1089,35 +1087,15 @@ class CoolingPage(QWidget):
         actions.addWidget(self.btn_save_curves)
         actions.addWidget(self.btn_apply)
         lay.addLayout(actions)
-        self.btn_details = QToolButton()
-        self.btn_details.setText("Подробности")
-        self.btn_details.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.btn_details.setCheckable(True)
-        lay.addWidget(self.btn_details)
-        self.details = QWidget()
-        dl = QVBoxLayout(self.details)
-        dl.addWidget(self.cooler_connection)
-        dl.addWidget(self.curves_status)
-        dl.addWidget(self.dirty)
-        dl.addWidget(muted(f"Сервис {UNIT}: режим d0 40/41, температура CPU d0 85 "
-                           f"каждые {core.FEED_INTERVAL_S:g} с. Доступ через hidraw.\n"
-                           f"Профиль: {core.CURVES_FILE}\nРежим: {core.COOLING_ENV}\n"
-                           "Если установленная копия устарела, обнови её через ./install.sh вручную."))
-        self.last_mode = muted("")
-        dl.addWidget(self.last_mode)
-        self.btn_service = QPushButton("Остановить передачу температуры")
-        dl.addWidget(self.btn_service)
-        self.chk_auto = QCheckBox("Запускать при входе в систему")
-        self.chk_auto.setChecked(True)
-        self.chk_auto.setToolTip("Изменение вступит в силу после нажатия «Применить»")
-        dl.addWidget(self.chk_auto)
-        self.btn_reset_curves = QPushButton("Сбросить видимые точки к образцу")
-        dl.addWidget(self.btn_reset_curves)
-        dl.addWidget(muted("RPM и температура жидкости недоступны: чтение не реализовано.\n"
-                           "Поведение после остановки передачи температуры не проверено владельцем."))
-        lay.addWidget(self.details)
-        self.details.hide()
-        self.btn_details.toggled.connect(self.show_details)
+        self.btn_service = QPushButton("Остановить")
+        self.btn_service.setToolTip("Остановить передачу температуры и отключить автозапуск")
+        actions.insertWidget(1, self.btn_service)
+        self.btn_reset_curves = QPushButton("Сбросить до стандартных")
+        lay.addWidget(self.btn_reset_curves, 0, Qt.AlignmentFlag.AlignLeft)
+        # Эти локальные сообщения объединяются в одну строку состояния внизу.
+        for label in (self.curves_status, self.dirty):
+            label.setParent(self)
+            label.hide()
         self.btn_save_curves.clicked.connect(self.save_curves)
         self.btn_reset_curves.clicked.connect(self.reset_curves)
         self.btn_apply.clicked.connect(self.apply)
@@ -1158,9 +1136,6 @@ class CoolingPage(QWidget):
         self.cards_layout.setColumnStretch(0, 2)
         self.cards_layout.setColumnStretch(1, 0 if narrow else 1)
 
-    def show_details(self, checked):
-        self.details.setVisible(checked)
-
     def mode(self):
         return next((key for key, b in self.buttons.items() if b.isChecked()), "balance")
 
@@ -1172,7 +1147,7 @@ class CoolingPage(QWidget):
         self.hint.setText("Выбери компонент. Точки можно перетаскивать или вводить числом." if custom else "")
         self.hint.setVisible(custom)
         self.layout_components()
-        self.btn_reset_curves.setEnabled(custom)
+        self.btn_reset_curves.setVisible(custom)
         self.update_dirty()
 
     def update_dirty(self):
@@ -1291,7 +1266,7 @@ class CoolingPage(QWidget):
             return
         self.service_error = ""
         self.set_service_status("Запускается", "Запускается передача температуры процессора…", WARN)
-        if not self.autostart(self.chk_auto.isChecked()):
+        if not self.autostart(True):
             self.refresh()
             return
         code, out = systemctl(command, UNIT)
@@ -1313,6 +1288,7 @@ class CoolingPage(QWidget):
             QMessageBox.warning(self, "Сервис не остановлен", out or "Не удалось остановить")
         else:
             self.service_error = ""
+            self.autostart(False)
         self.refresh()
 
     def autostart(self, checked):
@@ -1332,17 +1308,10 @@ class CoolingPage(QWidget):
 
     def refresh(self):
         inst = unit_installed()
-        connected = core.usb_present(core.COOLER_VID, core.COOLER_PID)
-        self.cooler_connection.setText("Контроллер охлаждения подключён" if connected else "Контроллер охлаждения не найден")
         self.btn_apply.setEnabled(inst)
         self.btn_apply.setToolTip("" if inst else "Сервис не установлен: выполни ./install.sh вручную")
-        self.chk_auto.setEnabled(inst)
+        self.btn_service.setVisible(False)
         self.btn_service.setEnabled(False)
-        try:
-            last = COOLING_TITLES.get(json.loads(core.COOLING_STATE.read_text())["mode"], "неизвестный")
-        except (OSError, ValueError, KeyError, TypeError):
-            last = "нет данных"
-        self.last_mode.setText(f"Последний отправленный режим: {last}. Обратного чтения с устройства нет.")
         if not inst:
             self.set_service_status("Остановлен", "Сервис не установлен — выполни ./install.sh вручную", WARN)
             return
@@ -1356,20 +1325,21 @@ class CoolingPage(QWidget):
                              and properties.get("Result") not in (None, "success"))
         self.status.setToolTip("")
         if state not in ("active", "inactive", "failed", "activating", "reloading", "deactivating"):
-            self.set_service_status("Неизвестно", "Статус сервиса неизвестен", WARN)
+            self.set_service_status("Ошибка", "Статус сервиса неизвестен", WARN)
             self.status.setToolTip(state)
         elif state == "failed" or restart_error or self.service_error:
-            self.set_service_status("Ошибка", "Ошибка сервиса: " + (self.service_error or "Передача температуры остановлена")
-                                    + "; " + self.journal_line(), BAD)
+            self.set_service_status("Ошибка", "Ошибка сервиса: " + self.journal_line()[:240]
+                                    + ". Если установленная копия устарела: ./install.sh", BAD)
         elif code == 0 and state == "active":
             self.set_service_status("Работает", "Сервис передачи температуры процессора работает; приём не подтверждён", OK)
             self.btn_service.setEnabled(True)
+            self.btn_service.setVisible(True)
         elif state in ("activating", "reloading"):
             self.set_service_status("Запускается", "Запускается передача температуры процессора…", WARN)
         elif state in ("inactive", "deactivating"):
-            self.set_service_status("Остановлен", "Передача температуры процессора остановлена — охлаждение без неё не проверено", WARN)
+            self.set_service_status("Остановлен", "Передача температуры процессора остановлена", WARN)
         else:
-            self.set_service_status("Неизвестно", "Статус сервиса неизвестен", WARN)
+            self.set_service_status("Ошибка", "Статус сервиса неизвестен", WARN)
             self.status.setToolTip(state)
 
 
@@ -1532,6 +1502,8 @@ class MainWindow(QMainWindow):
             explanation.setMinimumWidth(0)
             explanation.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             row_layout.addWidget(status_badge)
+            if status_badge is cooling.service_badge:
+                row_layout.addWidget(cooling.btn_service)
             row_layout.addWidget(explanation, 1)
             for button in buttons:
                 # Переносим сами кнопки: обработчики и подтверждения остаются прежними.
