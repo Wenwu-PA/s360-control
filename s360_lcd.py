@@ -55,7 +55,7 @@ COOLING_LABELS = {"silent": "Silent", "balance": "Balance", "game": "Game Mode"}
 FEED_FREQ_DUMMY_MHZ = 3000              # как в стороннем драйвере: прошивка частоту CPU, по их словам, не использует
 FEED_INTERVAL_S = 2.0
 
-DEFAULT_SETTINGS = {"fps": "15", "max_seconds": None, "scale": "fill", "focus_x": 0.5, "focus_y": 0.5,
+DEFAULT_SETTINGS = {"screen_pos": 0, "fps": "15", "max_seconds": None, "scale": "fill", "focus_x": 0.5, "focus_y": 0.5,
                     "with_select": True, "cooling_mode": "balance", "background": "black", "rotate": 0,
                     "device_direction": 0, "edge_trim": 0, "brightness": 100, "lcd_enabled": True,
                     "last_file": None, "last_upload_time": None, "lcd_mode": "media"}
@@ -181,7 +181,7 @@ def validate_mp4(b: bytes):
 
 
 # ----------------------------------------------------------------------------- конвертация
-ENC = {"fps": None, "max_seconds": None, "profile": "baseline", "level": "3.0", "pix_fmt": "yuvj420p",
+ENC = {"orient": 0, "fps": None, "max_seconds": None, "profile": "baseline", "level": "3.0", "pix_fmt": "yuvj420p",
        "scale": "fill", "focus_x": 0.5, "focus_y": 0.5, "background": "black", "rotate": 0, "edge_trim": 0}
 W, H = 240, 320    # размер кадра эталонного MP4 (портрет), как в захвате
 
@@ -198,18 +198,24 @@ def _bg_color():
     raise S360Error("фон: имя цвета (black, white...) или #RRGGBB")
 
 
-def build_vf(fps=None, tail=None):
-    """Фильтр ffmpeg: [fps] -> поворот -> прозрачность на фон (В ИСХОДНОМ разрешении) -> масштаб под экран -> формат.
-    Подложка ДО масштабирования важна: прозрачные пиксели GIF несут белый цвет, и при масштабировании он
-    подмешивался в край фигуры (белая обводка).  --edge-trim N стачивает прозрачный край на N пикселей (0..3).
-    Поворот программный (меняет картинку), команда поворота экрана здесь не отправляется.
-    fit - вписать (полосы цвета фона); fill - заполнить с обрезкой (--focus-x/y); stretch - растянуть."""
+def build_vf(fps=None, tail=None, viewer=False):
+    """Фильтр ffmpeg: [fps] -> поворот картинки -> прозрачность на фон (в исходном разрешении) -> масштаб под экран ->
+    компенсация положения экрана -> формат.
+    «Поворот картинки» (ENC["rotate"]) крутит само изображение по часовой стрелке.
+    «Положение экрана» (ENC["orient"]) — как физически повёрнут экран по часовой: 0/90/180/270. Кадр зрителя при 90/270
+    горизонтальный (320x240); в файл (всегда 240x320) картинка кладётся повёрнутой на (360 - положение), чтобы на повёрнутом
+    экране выглядеть прямо. viewer=True — кадр так, как его увидит зритель (для предпросмотра).
+    Команда поворота экрана (cmd 1a) здесь не отправляется. fit/fill/stretch — как раньше."""
     mode, bg, rot = ENC["scale"], _bg_color(), int(ENC["rotate"])
+    orient = int(ENC.get("orient") or 0)
     trim = int(ENC.get("edge_trim") or 0)
     if rot not in ROT:
         raise S360Error("поворот: 0, 90, 180 или 270")
+    if orient not in ROT:
+        raise S360Error("положение экрана: 0, 90, 180 или 270")
     if not 0 <= trim <= 3:
         raise S360Error("edge-trim: от 0 до 3")
+    vw, vh = (H, W) if orient in (90, 270) else (W, H)
     parts = []
     if fps or ENC["fps"]:
         parts.append(f"fps={fps or ENC['fps']}")
@@ -220,16 +226,19 @@ def build_vf(fps=None, tail=None):
         parts.append("split[ea][eb];[ea]alphaextract" + ",erosion" * trim + "[em];[eb][em]alphamerge")
     parts.append(f"split[fg][t];[t]drawbox=x=0:y=0:w=iw:h=ih:color={bg}@1:t=fill[bgl];[bgl][fg]overlay=format=auto")
     if mode == "fit":
-        parts.append(f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:{bg}")
+        parts.append(f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2:{bg}")
     elif mode == "fill":
         fx, fy = float(ENC["focus_x"]), float(ENC["focus_y"])
-        parts.append(f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-                     f"crop={W}:{H}:(iw-{W})*{fx}:(ih-{H})*{fy}")
+        parts.append(f"scale={vw}:{vh}:force_original_aspect_ratio=increase,"
+                     f"crop={vw}:{vh}:(iw-{vw})*{fx}:(ih-{vh})*{fy}")
     elif mode == "stretch":
-        parts.append(f"scale={W}:{H}")
+        parts.append(f"scale={vw}:{vh}")
     else:
         raise S360Error(f"неизвестный режим масштабирования: {mode}")
     parts.append("setsar=1")
+    comp = (360 - orient) % 360
+    if not viewer and ROT[comp]:
+        parts.append(ROT[comp])
     return ",".join(parts) + "," + (tail or f"format={ENC['pix_fmt']}")
 
 
@@ -257,11 +266,11 @@ def convert_gif(src: Path, dst: Path, fps=None):
     _run_ffmpeg(cmd + [str(dst)], 120)
 
 
-def preview_png(src: Path, dst: Path):
-    """Первый кадр с текущими настройками масштабирования (без USB)."""
+def preview_png(src: Path, dst: Path, viewer=False):
+    """Первый кадр с текущими настройками (без USB). viewer=True — кадр глазами зрителя (при положении 90/270 горизонтальный)."""
     Path(dst).unlink(missing_ok=True)
     _run_ffmpeg(["ffmpeg", "-hide_banner", "-loglevel", "error", "-n", "-i", str(src),
-                 "-vf", build_vf(None, tail="format=rgb24"), "-frames:v", "1", str(dst)], 60)
+                 "-vf", build_vf(None, tail="format=rgb24", viewer=viewer), "-frames:v", "1", str(dst)], 60)
 
 
 def probe_mp4(data: bytes):
