@@ -95,7 +95,7 @@ def main():
             assert 'Свой профиль · работает' in window.dashboard.svc.text()  # 7
             window.settings.update(last_file='/tmp/земля.gif', last_upload_time=1000)
             window.tick()
-            assert 'земля.gif' in window.dashboard.last_file.text() and 'отправлено' in window.dashboard.last_upload.text()
+            assert 'земля.gif' in window.dashboard.last_file.text() and 'Отправлено' in window.dashboard.last_upload.text()
             assert 'применено' not in window.dashboard.last_upload.text()
             assert not errors and not core.STATE.exists()
             window.close(); app.processEvents()  # 8

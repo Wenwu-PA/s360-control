@@ -120,6 +120,11 @@ QGroupBox#lcdTile {{ background: {c['control']}; margin-top: 0; padding: {gap}px
 QLineEdit#tileValue, QDoubleSpinBox#tileValue {{ font-size: {FONT_SIZES['heading']}px; font-weight: 600; background: transparent; border: none; padding: 0; }}
 QLabel[lcdCaption="true"] {{ font-size: {FONT_SIZES['caption']}px; }}
 QLabel#lcdTitle {{ font-size: {FONT_SIZES['title']}px; font-weight: 600; }}
+QGroupBox#clockCard {{ padding: 0; }}
+QListWidget {{ background: {c['surface']}; border: none; }}
+QListWidget::item {{ border: 1px solid transparent; border-radius: {small}px; padding: 4px; }}
+QListWidget::item:selected {{ background: {c['control']}; color: {c['text']}; border-color: {c['accent']}; }}
+QListWidget::item:hover {{ background: {c['hover']}; }}
 QLabel#clockTime {{ font-size: {FONT_SIZES['heading']}px; font-weight: 600; }}
 QLabel#clockStyle {{ background: {c['control']}; border: 1px solid {c['accent']}; border-radius: {medium}px; padding: 12px 18px; }}
 QLabel#clockPreview {{ background: {c['background']}; font-size: {LINE_HEIGHTS['heading']}px; font-weight: 600; border-radius: {medium}px; }}

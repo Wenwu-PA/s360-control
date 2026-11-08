@@ -93,7 +93,7 @@ def main():
             page.mode_buttons["clock"].click()
             assert page.mode_buttons["clock"].isChecked() and not page.clock_panel.isHidden()
             assert page.panel.isHidden() and not page.preview_box.isHidden()
-            assert page.clock_panel.title() == "Часы"
+            assert page.clock_heading.text() == "Часы" and page.clock_panel.title() == ""
             assert "из системы · UTC" in page.lbl_clock_time.text()
             assert core.load_settings()["lcd_mode"] == "clock"
             restored = gui.LcdPage(core.load_settings())
