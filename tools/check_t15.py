@@ -74,6 +74,9 @@ def main():
         from PySide6.QtGui import QKeyEvent, QMouseEvent
         from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QScrollArea
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         import s360_lcd as core
 
         def forbidden(*args, **kwargs):

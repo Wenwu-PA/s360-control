@@ -122,7 +122,7 @@ QLabel[lcdCaption="true"] {{ font-size: {FONT_SIZES['caption']}px; }}
 QLabel#lcdTitle {{ font-size: {FONT_SIZES['title']}px; font-weight: 600; }}
 QLabel#clockTime {{ font-size: {FONT_SIZES['heading']}px; font-weight: 600; }}
 QLabel#clockStyle {{ background: {c['control']}; border: 1px solid {c['accent']}; border-radius: {medium}px; padding: 12px 18px; }}
-QLabel#clockPreview {{ background: {c['background']}; font-size: 72px; font-weight: 600; border-radius: {medium}px; }}
+QLabel#clockPreview {{ background: {c['background']}; font-size: {LINE_HEIGHTS['heading']}px; font-weight: 600; border-radius: {medium}px; }}
 QLabel#preview {{ background: {c['background']}; border: 1px solid {c['border']}; border-radius: {medium}px; }}
 QLabel#warn {{ background: {c['surface']}; color: {c['warning']}; border: 1px solid {c['border']}; border-radius: {medium}px; padding: {gap}px; }}
 QToolTip {{ background: {c['control']}; color: {c['text']}; border: 1px solid {c['border']}; }}

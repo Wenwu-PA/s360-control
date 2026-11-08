@@ -20,6 +20,9 @@ def main():
         from PySide6.QtCore import QEventLoop, QTimer
         from PySide6.QtWidgets import QApplication, QMessageBox
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         # Проверки прежних экранов: состояние подключения изолировано от хоста.
         patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
@@ -115,7 +118,8 @@ def main():
                 QTimer.singleShot(10, release.set)
                 settle(page)
                 assert calls[-1] == (value, True)
-                assert "Приём LCD не подтверждён" in page.lbl_brightness_status.text()
+                assert page.lbl_brightness_status.text() == "Отправлено"
+                assert "не подтверждён" in page.lbl_brightness_status.toolTip()
                 assert page.panel.isEnabled() and page.brightness_panel.isEnabled()
                 assert page.prog.value() == len(core.build_brightness_plan(value))
             # Ошибки доступа, отключения, частичной записи и неожиданные исключения.
@@ -125,7 +129,7 @@ def main():
                 page.sld_brightness.setValue(54)
                 page.btn_brightness.click()
                 settle(page)
-                assert critical.called and "Ошибка отправки" in page.lbl_brightness_status.text()
+                assert critical.called and "Ошибка: " in page.lbl_brightness_status.text()
                 assert page.pending_brightness is None and page.panel.isEnabled()
                 assert core.load_settings()["brightness"] == 54
                 assert core.load_settings()["last_file"] is None

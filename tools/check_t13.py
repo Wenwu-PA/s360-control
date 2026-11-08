@@ -15,6 +15,9 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         import s360_lcd as core
 
         def forbidden(*args, **kwargs):
@@ -56,12 +59,9 @@ def main():
                 state.return_value = "denied"; window.tick()
                 assert window.overview_state == "denied" and "./install.sh" in window.state_detail.text()  # 6
                 state.return_value = "ready"; window.tick()
-                assert window.overview_state == "first" and not window.btn_first_run.isHidden()
-                with patch.object(gui, "save_ui_settings", side_effect=OSError("нет доступа")):
-                    window.btn_first_run.click()
-                assert warning.called and not window.settings["first_run_done"]  # 7
-                window.btn_first_run.click()
-                assert gui.load_ui_settings()["first_run_done"] and window.stack.currentIndex() == 1
+                assert window.overview_state == "overview" and window.overview_states.currentWidget() is window.dashboard
+                assert not hasattr(window, "btn_first_run") and window.page_title.text() == "Мониторинг"  # 7
+                window.stack.setCurrentIndex(1)
                 window.stack.setCurrentIndex(0)
                 assert window.overview_state == "overview" and window.dashboard.cpu.text() == "48 °C"  # 8
                 gui.save_ui_settings(window.settings)
@@ -71,7 +71,7 @@ def main():
                     window.tick()
                 assert window.dashboard.cpu.text() == "Датчик недоступен" and not core.STATE.exists() and not errors
                 restored.close(); window.close(); app.processEvents()  # 10
-        print("T13 ok: 10 проверок; права без открытия, состояния, повторная проверка, первый запуск и сохранение; отправок нет")
+        print("T13 ok: 10 проверок; права без открытия, состояния, повторная проверка, мониторинг без первого запуска, сохранение; отправок нет")
 
 
 if __name__ == "__main__":

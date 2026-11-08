@@ -16,6 +16,9 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QLabel, QDialogButtonBox
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         import s360_lcd as core
 
         def forbidden(*args, **kwargs):
@@ -58,7 +61,7 @@ def main():
                 question.return_value = QMessageBox.StandardButton.Yes
                 lcd.btn_clock.click()
                 assert start.call_args.args == ([], "clock:1", "clock")
-                assert "На время передачи драйвер HID временно отключится" in question.call_args.args[2]
+                assert "HID" not in question.call_args.args[2] and len(question.call_args.args[2].splitlines()) == 2
                 lcd.pending_clock = None
                 lcd.btn_brightness.click()
                 assert start.call_args.args[1:] == ("brightness:42", "brightness")
@@ -86,7 +89,7 @@ def main():
                 question.return_value = QMessageBox.StandardButton.Yes
                 lcd.btn_send.click()
                 assert start.call_args.args[0] == ["select", "upload"] and select.call_count == 1
-                assert "На время передачи драйвер HID временно отключится" in question.call_args.args[2]  # 7
+                assert "HID" not in question.call_args.args[2] and len(question.call_args.args[2].splitlines()) == 2  # 7
             for position in (0, 90, 180, 270):
                 lcd.position_buttons[position].click()
                 lcd.apply_enc()
@@ -103,7 +106,7 @@ def main():
                       patch.object(lcd, "start_worker", side_effect=forbidden)):
                     question.return_value = QMessageBox.StandardButton.No
                     lcd.send()
-                    assert (f"Положение экрана: {position}°" in question.call_args.args[2]) == (position != 0)
+                    assert "Положение экрана" not in question.call_args.args[2]
             lcd.position_buttons[0].click()
             with (patch.object(core, "load_media", return_value=b"prepared"),
                   patch.object(lcd, "start_worker", side_effect=forbidden)):
@@ -112,7 +115,7 @@ def main():
                                                  (8.96, "60", True), (2, "60001/1000", True)):
                     with patch.object(core, "probe_mp4", return_value=(duration, 100, rate)):
                         lcd.send()
-                    assert ("выше проверенного" in question.call_args.args[2]) == warning  # 8
+                    assert ("Файл длиннее проверенного" in question.call_args.args[2]) == warning  # 8
             saved = gui.load_ui_settings(); saved["fps"] = "20/3"; saved["edge_trim"] = 2
             saved.update(max_seconds=None, background="white", focus_x=.23, focus_y=.78)
             gui.save_ui_settings(saved)
@@ -123,9 +126,9 @@ def main():
             assert core.ENC["focus_x"] == core.ENC["focus_y"] == .5
             restored.timer.stop(); restored.close()  # 9
             lcd.mode_buttons["clock"].click()
-            lcd.transfer_states["clock"] = ("Отправлено", "Хост отправил; приём LCD не подтверждён")
+            lcd.transfer_states["clock"] = ("Отправлено", "Отправлено")
             lcd.footer_changed.emit()
-            assert "Отправлено" in window.lcd_badge.text() and "не подтверждён" in window.lcd_status.text()
+            assert "Отправлено" in window.lcd_badge.text() and window.lcd_status.text() == "Отправлено"
             assert not errors and not core.STATE.exists()
             lcd.timer.stop(); window.timer.stop(); window.close(); app.processEvents()  # 10
             # Стандартные кнопки и штатный qtbase_ru, и запасные ручные подписи.
