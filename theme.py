@@ -2,11 +2,26 @@
 
 COLORS = {
     "background": "#141619", "surface": "#1C1F24", "control": "#292D34",
-    "hover": "#353A43", "border": "#484F59", "text": "#F2F3F5",
+    "hover": "#353A43", "border": "#484F59", "inputBorder": "#6B7480", "text": "#F2F3F5",
     "secondary": "#B7BEC8", "disabled": "#959DA8", "accent": "#B72F3D",
     "accentHover": "#C43948", "accentPressed": "#982735", "line": "#E66A75",
     "good": "#95C7AC", "warning": "#DEC18C", "error": "#F28E96",
 }
+THEMES = {
+    "dark": dict(COLORS),
+    "oled": dict(COLORS, background="#000000", surface="#0B0C0E", control="#1A1C20", hover="#25282E"),
+    "light": dict(COLORS, background="#F4F5F7", surface="#FFFFFF", control="#E9ECF0",
+                  hover="#DDE1E7", border="#8A929D", inputBorder="#8A929D", text="#14161A",
+                  secondary="#4A515C", disabled="#6B7380", accentHover="#A52A37",
+                  accentPressed="#8A2230", line="#C23847", good="#2E7D55",
+                  warning="#8A6200", error="#B3261E"),
+}
+
+
+def select_theme(name):
+    COLORS.update(THEMES.get(name, THEMES["dark"]))
+
+
 FONT_FAMILIES = ("Inter", "Noto Sans")
 FONT_SIZES = {"heading": 24, "title": 16, "body": 14, "caption": 12}
 LINE_HEIGHTS = {"heading": 32, "title": 24, "body": 20, "caption": 16}
@@ -78,17 +93,19 @@ QLabel#statusText, QLabel#muted {{ color: {c['secondary']}; }}
 QLabel#statusText, QLabel#statusBadge {{ font-size: {FONT_SIZES['caption']}px; }}
 QGroupBox {{ background: {c['surface']}; border: 1px solid {c['border']}; border-radius: {medium}px; margin-top: {space}px; padding: {space}px; }}
 QGroupBox::title {{ subcontrol-origin: margin; left: {space}px; color: {c['secondary']}; }}
-QPushButton, QToolButton {{ background: {c['control']}; border: 1px solid {c['border']}; border-radius: {small}px; padding: {gap}px {space}px; }}
+QPushButton, QToolButton {{ background: {c['control']}; border: 1px solid {c['inputBorder']}; border-radius: {small}px; padding: {gap}px {space}px; }}
 QPushButton:hover, QToolButton:hover {{ background: {c['hover']}; }}
 QPushButton:pressed, QToolButton:pressed {{ background: {c['background']}; }}
 QPushButton:checked {{ border-color: {c['accent']}; }}
 QPushButton[coolingCard="true"] {{ text-align: left; padding: {space}px; }}
-QPushButton#primary {{ background: {c['accent']}; border-color: {c['accent']}; }}
+QPushButton#primary {{ color: #FFFFFF; background: {c['accent']}; border-color: {c['accent']}; }}
 QPushButton#primary:hover {{ background: {c['accentHover']}; }}
 QPushButton#primary:pressed {{ background: {c['accentPressed']}; }}
-QPushButton:disabled, QToolButton:disabled, QPushButton#primary:disabled {{ background: {c['control']}; color: {c['disabled']}; border-color: {c['border']}; }}
+QPushButton:disabled, QToolButton:disabled, QPushButton#primary:disabled {{ background: {c['control']}; color: {c['disabled']}; border-color: {c['inputBorder']}; }}
 QWidget:disabled {{ color: {c['disabled']}; }}
-QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{ background: {c['control']}; border: 1px solid {c['border']}; border-radius: {small}px; padding: {gap}px; }}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{ background: {c['control']}; border: 1px solid {c['inputBorder']}; border-radius: {small}px; padding: {gap}px; }}
+QSpinBox[curveInput="true"] {{ padding: 4px; }}
+QSpinBox[curveInput="true"] QLineEdit {{ background: transparent; border: none; padding: 0; }}
 QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {c['text']}; }}
 QProgressBar {{ background: {c['control']}; border: none; border-radius: {small}px; text-align: center; }}
 QProgressBar::chunk {{ background: {c['accent']}; border-radius: {small}px; }}
@@ -105,7 +122,7 @@ QLabel[lcdCaption="true"] {{ font-size: {FONT_SIZES['caption']}px; }}
 QLabel#lcdTitle {{ font-size: {FONT_SIZES['title']}px; font-weight: 600; }}
 QLabel#clockTime {{ font-size: {FONT_SIZES['heading']}px; font-weight: 600; }}
 QLabel#clockStyle {{ background: {c['control']}; border: 1px solid {c['accent']}; border-radius: {medium}px; padding: 12px 18px; }}
-QLabel#clockPreview {{ background: {c['background']}; font-size: 72px; font-weight: 600; border-radius: {medium}px; }}
+QLabel#clockPreview {{ background: {c['background']}; font-size: {LINE_HEIGHTS['heading']}px; font-weight: 600; border-radius: {medium}px; }}
 QLabel#preview {{ background: {c['background']}; border: 1px solid {c['border']}; border-radius: {medium}px; }}
 QLabel#warn {{ background: {c['surface']}; color: {c['warning']}; border: 1px solid {c['border']}; border-radius: {medium}px; padding: {gap}px; }}
 QToolTip {{ background: {c['control']}; color: {c['text']}; border: 1px solid {c['border']}; }}

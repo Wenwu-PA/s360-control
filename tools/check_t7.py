@@ -22,6 +22,9 @@ def main():
         from PySide6.QtCore import QEventLoop, QTimer
         from PySide6.QtWidgets import QApplication, QMessageBox
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         # Проверки прежних экранов: состояние подключения изолировано от хоста.
         patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
@@ -85,6 +88,7 @@ def main():
             app.processEvents()
             window.stack.setCurrentIndex(1)
             page = window.pages[1][1]
+            assert page.s["fps"] == "60" and page.s["max_seconds"] == 15 and page.background_value() == "black"
             assert page.s["lcd_mode"] == "media" and page.clock_panel.isHidden()
             page.mode_buttons["clock"].click()
             assert page.mode_buttons["clock"].isChecked() and not page.clock_panel.isHidden()
@@ -141,8 +145,9 @@ def main():
                 assert build.call_args.kwargs == {"now": local.timestamp(), "tz_offset": expected_offset}
                 assert calls[-1][0] == core.build_clock_plan(1, now=local.timestamp(), tz_offset=expected_offset)
                 assert calls[-1][1] is True
-                assert "Приём LCD не подтверждён" in page.lbl_clock_status.text()
-                assert local.strftime("%d.%m.%Y %H:%M:%S %z") in page.lbl_clock_status.text()
+                assert page.lbl_clock_status.text() == "Отправлено"
+                assert "не подтверждён" in page.lbl_clock_status.toolTip()
+                assert local.strftime("%d.%m.%Y %H:%M:%S %z") in page.lbl_clock_status.toolTip()
                 assert page.pending_clock is None and page.prog.value() == 2
                 assert page.mode_buttons["media"].isEnabled() and "monitor" not in page.mode_buttons
             question.side_effect = None
@@ -152,7 +157,7 @@ def main():
                 failure = error
                 page.btn_clock.click()
                 settle(page)
-                assert critical.called and "Ошибка отправки часов" in page.lbl_clock_status.text()
+                assert critical.called and "Ошибка: " in page.lbl_clock_status.text()
                 assert str(error) in page.lbl_clock_status.text()
                 assert page.pending_clock is None and page.clock_panel.isEnabled()
             failure = None

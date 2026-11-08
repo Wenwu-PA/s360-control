@@ -7,6 +7,63 @@ import tempfile
 from unittest.mock import patch
 
 
+def check_visible_text(app, window, page, background):
+    """Контраст реальных глифов по grab(); пустой редактор обязан провалить проверку."""
+    from PySide6.QtGui import QColor
+
+    def luminance(color):
+        channels = [color.redF(), color.greenF(), color.blueF()]
+        linear = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in channels]
+        return sum(v * weight for v, weight in zip(linear, (.2126, .7152, .0722)))
+
+    bg = luminance(QColor(background))
+
+    def capture(spin):
+        spin.clearFocus()
+        spin.lineEdit().deselect()
+        app.processEvents()
+        image = spin.grab().toImage()
+        # Только внутренность редактора: без рамки, стрелок, фокуса и курсора.
+        rect = spin.lineEdit().geometry().intersected(spin.rect()).adjusted(2, 2, -2, -2)
+        return image, rect
+
+    def rendered(spin, empty, snapshot=None):
+        image, rect = capture(spin) if snapshot is None else snapshot
+        ratio = image.devicePixelRatio()
+        light = 0
+        for y in range(round(rect.top() * ratio), round((rect.bottom() + 1) * ratio)):
+            for x in range(round(rect.left() * ratio), round((rect.right() + 1) * ratio)):
+                value = luminance(image.pixelColor(x, y))
+                light += ((max(value, bg) + .05) / (min(value, bg) + .05) >= 4.5
+                          and image.pixelColor(x, y) != empty.pixelColor(x, y))
+        assert light >= 12, (spin.accessibleName(), spin.size(), rect, light)
+
+    for width in (1200, 960):
+        window.resize(width, 800)
+        for channel, card in page.cards.items():
+            page.select_component(channel)
+            app.processEvents()
+            app.processEvents()
+            assert card.chips_widget.isVisible()
+            for index, inputs in enumerate(card.chips):
+                for key, spin in inputs.items():
+                    assert spin.value() == card.graph.values[key][index]
+                    value = spin.value()
+                    original = capture(spin)
+                    spin.clear()  # Суффикс остаётся: он тоже не должен выдать пустое поле за число.
+                    empty, _ = capture(spin)
+                    rendered(spin, empty, original)
+                    try:
+                        rendered(spin, empty)
+                    except AssertionError:
+                        pass
+                    else:
+                        raise AssertionError('Пустое поле прошло проверку отрисовки')
+                    finally:
+                        spin.setValue(value)
+                    rendered(spin, empty)
+
+
 def main():
     os.environ['QT_QPA_PLATFORM'] = 'offscreen'
     with tempfile.TemporaryDirectory(prefix='s360-t15-') as tmp:
@@ -17,6 +74,9 @@ def main():
         from PySide6.QtGui import QKeyEvent, QMouseEvent
         from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QScrollArea
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         import s360_lcd as core
 
         def forbidden(*args, **kwargs):
@@ -120,11 +180,12 @@ def main():
             assert page.btn_apply.isVisible() and page.btn_apply.mapTo(window, page.btn_apply.rect().bottomRight()).y() < window.height()
             assert scroll.horizontalScrollBar().maximum() == 0  # 9: закреплённое действие, без горизонтальной прокрутки
             assert not any(label.text() == 'Охлаждение' for label in page.findChildren(QLabel))
-            assert page.btn_details.arrowType() == Qt.ArrowType.NoArrow and page.btn_details.text() == 'Подробности'
-            page.btn_details.click()
-            assert not page.details.isHidden()
-            page.btn_details.click()
-            assert page.details.isHidden() and not errors and not core.STATE.exists()
+            assert not hasattr(page, 'btn_details') and not hasattr(page, 'details') and not hasattr(page, 'chk_auto')
+            assert page.btn_reset_curves.text() == 'Сбросить до стандартных'
+            for name in ('dark', 'light', 'oled'):
+                window.pages[3][1].theme_buttons[name].click()
+                check_visible_text(app, window, page, gui.theme.COLORS['control'])
+            assert not errors and not core.STATE.exists()
             window.close()
             app.processEvents()  # 10: служебные действия доступны, лишние элементы убраны
         print('T15 ok: 10 проверок; preset, выбор редактора, мышь/числа/клавиатура, каналы, узкое окно; отправок нет')

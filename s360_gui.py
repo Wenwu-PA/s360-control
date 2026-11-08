@@ -6,8 +6,8 @@
   Режимы кулера и свой профиль: работа и изменение оборотов подтверждены владельцем; обратного чтения нет.
   Поворот экрана доступен через CLI.
   Яркость и вкл/выкл: через API ядра, с подтверждением записи во флеш.
-  Часы: подтверждённый стиль 1, местное время перед отправкой, без автосинхронизации.
-  Недоступно в GUI: другие режимы экрана, чтение RPM/температуры жидкости.
+  Часы: подтверждённые стили 1–5, местное время перед отправкой, без автосинхронизации.
+  Недоступно в GUI: другие режимы экрана и температура жидкости.
 """
 from copy import deepcopy
 from html import escape
@@ -15,7 +15,6 @@ from fractions import Fraction
 import datetime
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -23,20 +22,21 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QPointF, QRectF
 from PySide6.QtGui import QColor, QPixmap, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import (QApplication, QBoxLayout, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                                QGridLayout, QToolTip, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
                                QScrollArea, QSizePolicy, QStackedWidget, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 import s360_lcd as core
 import theme
+import monitor
 
 UNIT = "s360-feed.service"
 COOLING_TITLES = {"silent": "Тихий", "balance": "Сбалансированный", "game": "Игровой", "custom": "Свой профиль"}
 OK, BAD, WARN = (theme.COLORS[key] for key in ("good", "error", "warning"))
 
 STYLE = theme.build_qss()
-UI_DEFAULT_SETTINGS = dict(core.DEFAULT_SETTINGS, fps="60", max_seconds=15, background="black")
+UI_DEFAULT_SETTINGS = dict(core.DEFAULT_SETTINGS, fps="60", max_seconds=15, background="black", theme="dark", clock_style=1)
 
 
 def badge(text, color):
@@ -67,25 +67,27 @@ def load_ui_settings():
     saved = {}
     try:
         saved = json.loads(core.SETTINGS.read_text())
-        if saved.get("first_run_done") is True:
-            settings["first_run_done"] = True
     except (OSError, ValueError, AttributeError):
         pass
     if isinstance(saved, dict):
         for key, value in UI_DEFAULT_SETTINGS.items():
             if key not in saved:
                 settings[key] = value
+    settings.update(rotate=0, fps="60", max_seconds=15, background="black")
+    settings["theme"] = saved.get("theme", "dark") if isinstance(saved, dict) else "dark"
+    if settings["theme"] not in theme.THEMES:
+        settings["theme"] = "dark"
+    style = saved.get("clock_style", 1) if isinstance(saved, dict) else 1
+    settings["clock_style"] = style if type(style) is int and 1 <= style <= 5 else 1
     return settings
 
 
 def save_ui_settings(settings):
-    # Ядро хранит только известные ему поля; GUI добавляет собственный флаг.
-    done = settings.get("first_run_done", False)
+    # Поля интерфейса дописываются после сохранения известных ядру настроек.
     core.save_settings(settings)
-    if done:
-        saved = json.loads(core.SETTINGS.read_text())
-        saved["first_run_done"] = True
-        core._atomic_json(core.SETTINGS, saved)
+    saved = json.loads(core.SETTINGS.read_text())
+    saved.update(theme=settings.get("theme", "dark"), clock_style=settings.get("clock_style", 1))
+    core._atomic_json(core.SETTINGS, saved)
 
 
 def device_access(vid, pid, *, lcd=False, root=Path("/sys/bus/usb/devices")):
@@ -117,9 +119,10 @@ class SendWorker(QThread):
     done_ok = Signal()
     failed = Signal(str, bool)
 
-    def __init__(self, plan, detach_ok, sha, kind="upload"):
+    def __init__(self, plan, detach_ok, sha, kind="upload", clock_style=1):
         super().__init__()
         self.plan, self.detach_ok, self.sha, self.kind = plan, detach_ok, sha, kind
+        self.clock_style = clock_style
         self._cancel = False
 
     def cancel(self):
@@ -129,7 +132,7 @@ class SendWorker(QThread):
         try:
             if self.kind == "clock":
                 now = datetime.datetime.now().astimezone()
-                self.plan = core.build_clock_plan(1, now=now.timestamp(),
+                self.plan = core.build_clock_plan(self.clock_style, now=now.timestamp(),
                                                   tz_offset=int(now.utcoffset().total_seconds()))
                 self.clock_time.emit(now.strftime("%d.%m.%Y %H:%M:%S %z"))
             core.do_send(self.plan, self.detach_ok, self.sha,
@@ -143,8 +146,25 @@ class SendWorker(QThread):
         self.done_ok.emit()
 
 
+class MonitorWorker(QThread):
+    result = Signal(dict)
+    failed = Signal()
+
+    def __init__(self, kind, parent):
+        super().__init__(parent)
+        self.kind = kind
+
+    def run(self):
+        try:
+            result = monitor.read_cooler_status() if self.kind == "cooler" else monitor.read_gpu_temps()
+        except Exception:
+            self.failed.emit()
+        else:
+            self.result.emit(result)
+
+
 class DashboardPage(QWidget):
-    configure_lcd = Signal()
+    status_changed = Signal()
 
     def __init__(self, settings):
         super().__init__()
@@ -154,12 +174,12 @@ class DashboardPage(QWidget):
         lay.setSpacing(theme.SPACING[1])
         cpu_box = QGroupBox("Температура процессора")
         cpu_layout = QVBoxLayout(cpu_box)
-        self.cpu = QLabel("—")
+        self.cpu = QLabel()
         self.cpu.setObjectName("temperature")
         cpu_layout.addWidget(self.cpu)
         cpu_layout.addStretch()
         cpu_layout.addWidget(muted("Системный датчик CPU"))
-        self.cpu_updated = muted("—")
+        self.cpu_updated = muted("")
         cpu_layout.addWidget(self.cpu_updated)
         lay.addWidget(cpu_box, 0, 0, 2, 1)
         box = QGroupBox("Подключение")
@@ -168,7 +188,8 @@ class DashboardPage(QWidget):
         form.addRow("LCD-дисплей", self.lcd)
         form.addRow("Контроллер охлаждения", self.cooler)
         lay.addWidget(box, 0, 1)
-        upload_box = QGroupBox("Последнее отправленное")
+        form.addRow("Охлаждение", self.svc)
+        upload_box = QGroupBox("LCD")
         upload_form = QVBoxLayout(upload_box)
         self.last_file, self.last_upload = QLabel(), muted("")
         self.last_file.setTextFormat(Qt.TextFormat.PlainText)
@@ -182,22 +203,90 @@ class DashboardPage(QWidget):
         lay.setColumnStretch(0, 1)
         lay.setColumnStretch(1, 2)
         lay.setRowStretch(2, 1)
-        self.btn_configure = QPushButton("Настроить LCD")
-        self.btn_configure.setObjectName("primary")
-        self.btn_configure.clicked.connect(self.configure_lcd.emit)
+        rpm_box = QGroupBox("Обороты охлаждения")
+        rpm_form = QFormLayout(rpm_box)
+        self.radiator_rpm, self.pump_rpm = QLabel("—"), QLabel("—")
+        rpm_form.addRow("Вентиляторы радиатора", self.radiator_rpm)
+        rpm_form.addRow("Помпа", self.pump_rpm)
+        lay.addWidget(rpm_box, 2, 1)
+        self.gpu_box = QGroupBox("Видеокарта")
+        gpu_form = QFormLayout(self.gpu_box)
+        self.gpu_values = {}
+        for key, title in (("core", "Ядро"), ("hotspot", "Hotspot"), ("vram", "VRAM")):
+            label, value = QLabel(title), QLabel()
+            gpu_form.addRow(label, value)
+            self.gpu_values[key] = (label, value)
+        self.gpu_box.hide()
+        lay.addWidget(self.gpu_box, 2, 0)
+        lay.setRowStretch(2, 0)
+        lay.setRowStretch(3, 1)
+        self.cooler_error = False
+        self._monitor_stopped = False
+        self.cooler_worker = MonitorWorker("cooler", self)
+        self.cooler_worker.result.connect(self.cooler_ready)
+        self.cooler_worker.failed.connect(self.cooler_failed)
+        self.gpu_worker = MonitorWorker("gpu", self)
+        self.gpu_worker.result.connect(self.gpu_ready)
+        self.gpu_worker.failed.connect(lambda: self.gpu_ready({}))
+        self.cooler_timer = QTimer(self)
+        self.cooler_timer.timeout.connect(self.poll_cooler)
+        self.cooler_timer.start(2000)
+        self.gpu_timer = QTimer(self)
+        self.gpu_timer.timeout.connect(self.poll_gpu)
+        self.gpu_timer.start(5000)
+        QTimer.singleShot(0, self.poll_cooler)
+        QTimer.singleShot(0, self.poll_gpu)
         self.refresh()
+
+    def poll_cooler(self):
+        if not self._monitor_stopped and not self.cooler_worker.isRunning():
+            self.cooler_worker.start()
+
+    def poll_gpu(self):
+        if not self._monitor_stopped and not self.gpu_worker.isRunning():
+            self.gpu_worker.start()
+
+    def cooler_ready(self, data):
+        self.radiator_rpm.setText(f"{data['rpm']['radiator']} об/мин")
+        self.pump_rpm.setText(f"{data['rpm']['pump']} об/мин")
+        self.cooler_error = False
+        self.status_changed.emit()
+
+    def cooler_failed(self):
+        self.radiator_rpm.setText("—")
+        self.pump_rpm.setText("—")
+        self.cooler_error = True
+        self.status_changed.emit()
+
+    def gpu_ready(self, data):
+        visible = False
+        for key, (label, value) in self.gpu_values.items():
+            available = data.get(key) is not None
+            label.setVisible(available)
+            value.setVisible(available)
+            value.setText(f"{data[key]} °C" if available else "")
+            visible |= available
+        self.gpu_box.setVisible(visible)
+
+    def stop_polling(self):
+        self._monitor_stopped = True
+        self.cooler_timer.stop()
+        self.gpu_timer.stop()
+        # Чтение имеет таймаут; завершаем потоки до уничтожения окна.
+        self.cooler_worker.wait()
+        self.gpu_worker.wait()
 
     def refresh(self):
         yes = lambda ok: badge("Подключён", OK) if ok else badge("Не найден", BAD)
         self.lcd.setText(yes(core.usb_present(core.VID, core.PID)))
         self.cooler.setText(yes(core.usb_present(core.COOLER_VID, core.COOLER_PID)))
-        self.last_file.setText(Path(self.s["last_file"]).name if self.s.get("last_file") else "—")
+        self.last_file.setText("Последнее на экране: " + Path(self.s["last_file"]).name if self.s.get("last_file") else "Изображение ещё не отправлялось")
         when = self.s.get("last_upload_time")
         if when is not None:
             when = datetime.datetime.fromtimestamp(when).strftime("%d.%m.%Y %H:%M:%S")
-            self.last_upload.setText(f"{when} — хост отправил; результат на экране не подтверждён")
+            self.last_upload.setText(f"{when} · отправлено хостом; приём не подтверждён")
         else:
-            self.last_upload.setText("—")
+            self.last_upload.setText("")
         st = core.read_state()
         names = {"HOST_COMPLETE_UNCONFIRMED": badge("хост отправил (экран не подтверждён)", WARN),
                  "IN_PROGRESS": badge("не завершена — состояние неизвестно", BAD),
@@ -211,16 +300,20 @@ class DashboardPage(QWidget):
             self.last_lcd.setText(f"{what}: {names.get(st['status'], st['status'])} — {when}" + (f", {tag}" if tag else ""))
         else:
             self.last_lcd.setText("нет данных")
-        if not unit_installed():
-            self.svc.setText(badge("не установлен (запусти install.sh)", WARN))
-        else:
-            active = systemctl("is-active", UNIT)[1] == "active"
-            self.svc.setText(badge("работает", OK) if active else badge("остановлен", WARN))
+        active = unit_installed() and systemctl("is-active", UNIT)[1] == "active"
+        try:
+            mode = json.loads(core.COOLING_STATE.read_text()).get("mode")
+        except (OSError, ValueError, AttributeError):
+            mode = None
+        title = COOLING_TITLES.get(mode)
+        text = "работает" if active else "остановлено"
+        self.svc.setText(badge(f"{title} · {text}" if title else text, OK if active else WARN))
+        self.svc.setToolTip("Последний отправленный режим; обратного чтения нет")
         try:
             self.cpu.setText(f"{core.read_cpu_temp()} °C")
             self.cpu_updated.setText("Обновлено только что")
         except core.S360Error as e:
-            self.cpu.setText("—")
+            self.cpu.setText("Датчик недоступен")
             self.cpu_updated.setText("Датчик CPU недоступен")
             self.cpu.setToolTip(str(e))
 
@@ -231,6 +324,8 @@ class LcdPage(QWidget):
     def __init__(self, settings):
         super().__init__()
         self.s = settings
+        self.s.update(rotate=0, fps="60", max_seconds=15, background="black")
+        self.s.setdefault("clock_style", 1)
         self.src = None
         self.source_duration = None
         self.pending_file = self.pending_brightness = self.pending_clock = self.pending_dir = None
@@ -300,13 +395,16 @@ class LcdPage(QWidget):
         self.lbl_prev.setObjectName("preview")
         self.lbl_prev.setFixedSize(168, 224)
         self.lbl_prev.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.clock_preview = QLabel("07\n24")
+        self.clock_preview = QLabel("07 : 24")
         self.clock_preview.setObjectName("clockPreview")
         self.clock_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.clock_preview.setMinimumSize(168, 224)
         self.preview_stack.addWidget(self.lbl_prev)
         self.preview_stack.addWidget(self.clock_preview)
         preview_layout.addWidget(self.preview_stack, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.clock_preview_note = muted("Время берётся из системы")
+        self.clock_preview_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_layout.addWidget(self.clock_preview_note)
         self.lbl_orientation = muted("")
         self.lbl_orientation.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_layout.addWidget(self.lbl_orientation)
@@ -336,60 +434,28 @@ class LcdPage(QWidget):
         for title, key in (("Заполнить", "fill"), ("Вписать", "fit"), ("Растянуть", "stretch")):
             self.cmb_scale.addItem(title, key)
         self.cmb_scale.setCurrentIndex(max(0, self.cmb_scale.findData(self.s["scale"])))
-        self.cmb_rot = QComboBox()
-        for deg in (0, 90, 180, 270):
-            self.cmb_rot.addItem(f"{deg}°", deg)
-        self.cmb_rot.setCurrentIndex(max(0, self.cmb_rot.findData(int(self.s["rotate"]))))
-        self.cmb_bg = QComboBox()
-        for title, key in (("Чёрный", "black"), ("Белый", "white"), ("Свой цвет", "custom")):
-            self.cmb_bg.addItem(title, key)
-        background = str(self.s["background"])
-        self.custom_background = background if background not in ("black", "white") else "#808080"
-        self.cmb_bg.setCurrentIndex(max(0, self.cmb_bg.findData(background if background in ("black", "white") else "custom")))
-        for col, (title, widget) in enumerate((("Масштаб", self.cmb_scale), ("Поворот картинки", self.cmb_rot), ("Фон прозрачности", self.cmb_bg))):
-            controls.addWidget(muted(title), 0, col)
-            controls.addWidget(widget, 1, col)
+        controls.addWidget(muted("Масштаб"), 0, 0)
+        controls.addWidget(self.cmb_scale, 1, 0)
         pl.addLayout(controls)
-        bg_row = QHBoxLayout()
-        self.btn_bg = QPushButton("Выбрать цвет…")
-        self.bg_sample = QLabel()
-        self.bg_sample.setFixedSize(theme.SPACING[2], theme.SPACING[2])
-        bg_row.addWidget(self.bg_sample)
-        bg_row.addWidget(self.btn_bg)
-        bg_row.addStretch()
-        pl.addLayout(bg_row)
+        position_row = QHBoxLayout()
+        position_row.addWidget(muted("Положение экрана"))
+        self.position_group = QButtonGroup(self)
+        self.position_buttons = {}
+        for angle in (0, 90, 180, 270):
+            button = QPushButton(f"{angle}°")
+            button.setCheckable(True)
+            button.setToolTip("Как повёрнут экран водянки. Картинка повернётся сама, чтобы выглядеть прямо")
+            self.position_group.addButton(button, angle)
+            self.position_buttons[angle] = button
+            button.setChecked(angle == int(self.s["screen_pos"]))
+            position_row.addWidget(button)
+        self.position_group.idClicked.connect(self.select_position)
+        pl.addLayout(position_row)
         # Подрезка остаётся локальной настройкой, редактора на главном экране нет.
         self.spn_trim = QSpinBox(self)
         self.spn_trim.setRange(0, 3)
         self.spn_trim.setValue(int(self.s["edge_trim"]))
         self.spn_trim.hide()
-        self.edt_fps = QLineEdit(str(self.s["fps"] or ""))
-        self.edt_fps.setPlaceholderText("как в файле")
-        self.spn_sec = QDoubleSpinBox()
-        self.spn_sec.setRange(0, 60)
-        self.spn_sec.setSingleStep(0.05)
-        self.spn_sec.setDecimals(2)
-        self.spn_sec.setSpecialValueText("весь GIF")
-        self.spn_sec.setToolTip("Максимальная длительность: короткий GIF не удлиняется.")
-        self.spn_sec.setValue(float(self.s["max_seconds"] or 0))
-        tiles = QHBoxLayout()
-        self.lbl_full_gif = muted("весь GIF")
-        self.lbl_full_gif.setProperty("status", "good")
-        for title, field, unit in (("Плавность", self.edt_fps, "кадров/с"), ("Длительность", self.spn_sec, "с")):
-            tile = QGroupBox()
-            tile.setObjectName("lcdTile")
-            tile_layout = QVBoxLayout(tile)
-            tile_layout.addWidget(muted(title))
-            value_row = QHBoxLayout()
-            field.setObjectName("tileValue")
-            field.setMinimumWidth(100)
-            value_row.addWidget(field, 1)
-            value_row.addWidget(QLabel(unit))
-            tile_layout.addLayout(value_row)
-            if field is self.spn_sec:
-                tile_layout.addWidget(self.lbl_full_gif)
-            tiles.addWidget(tile, 1)
-        pl.addLayout(tiles)
         pl.addStretch()
         self.btn_send = QPushButton("Загрузить на экран")
         self.btn_send.setObjectName("primary")
@@ -401,10 +467,16 @@ class LcdPage(QWidget):
         clock_form = QVBoxLayout(self.clock_panel)
         clock_form.setSpacing(theme.SPACING[1])
         style_row = QHBoxLayout()
-        style = QLabel("Стиль 1")
-        style.setObjectName("clockStyle")
-        style_row.addWidget(style)
-        style_row.addWidget(muted("Остальные стили пока недоступны"), 1)
+        self.clock_style_group = QButtonGroup(self)
+        self.clock_style_buttons = {}
+        for style in range(1, 6):
+            button = QPushButton(str(style))
+            button.setCheckable(True)
+            button.setChecked(style == self.s["clock_style"])
+            self.clock_style_group.addButton(button, style)
+            self.clock_style_buttons[style] = button
+            style_row.addWidget(button)
+        self.clock_style_group.idClicked.connect(self.select_clock_style)
         clock_form.addLayout(style_row)
         clock_form.addWidget(muted("Время на экране"))
         self.lbl_clock_time = QLabel()
@@ -413,6 +485,8 @@ class LcdPage(QWidget):
         clock_form.addWidget(self.lbl_clock_time)
         clock_note = muted("После отправки часы идут сами. Вернуть картинку можно на вкладке «Изображение / GIF».")
         clock_form.addWidget(clock_note)
+        self.lbl_clock_position = muted("Часы пока не поворачиваются под положение экрана")
+        clock_form.addWidget(self.lbl_clock_position)
         self.lbl_clock_status = muted("Часы из этого сеанса ещё не отправлялись. Состояние LCD не считано.")
         self.lbl_clock_status.hide()
         self.btn_clock = QPushButton("Показать часы")
@@ -444,11 +518,7 @@ class LcdPage(QWidget):
         self.btn_pick.clicked.connect(self.pick)
         self.btn_send.clicked.connect(self.send)
         self.btn_cancel.clicked.connect(self.cancel)
-        for widget in (self.cmb_scale, self.cmb_rot, self.cmb_bg):
-            widget.currentIndexChanged.connect(self.changed)
-        self.btn_bg.clicked.connect(self.pick_background)
-        self.edt_fps.textChanged.connect(self.changed)
-        self.spn_sec.valueChanged.connect(self.changed)
+        self.cmb_scale.currentIndexChanged.connect(self.changed)
         self.spn_trim.valueChanged.connect(self.changed)
         self.changed()
         self.show_mode()
@@ -459,7 +529,12 @@ class LcdPage(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.resize_preview()
+
+    def resize_preview(self):
         width, height = (168, 224) if self.width() < 1100 else (core.W, core.H)
+        if self.s["lcd_mode"] != "clock" and int(self.s["screen_pos"]) in (90, 270):
+            width, height = height, width
         self.preview_stack.setFixedSize(width, height)
         self.lbl_prev.setFixedSize(width, height)
         self.scale_preview()
@@ -475,6 +550,7 @@ class LcdPage(QWidget):
         self.panel.setVisible(not clock)
         self.preview_box.setVisible(True)
         self.preview_stack.setCurrentIndex(1 if clock else 0)
+        self.clock_preview_note.setVisible(clock)
         self.update_orientation()
         self.footer_changed.emit()
         self.btn_send.setVisible(not clock)
@@ -485,6 +561,13 @@ class LcdPage(QWidget):
             return
         self.s["lcd_mode"] = mode
         self.show_mode()
+        try:
+            save_ui_settings(self.s)
+        except OSError as e:
+            QMessageBox.warning(self, "Настройки не сохранены", str(e))
+
+    def select_clock_style(self, style):
+        self.s["clock_style"] = style
         try:
             save_ui_settings(self.s)
         except OSError as e:
@@ -504,7 +587,7 @@ class LcdPage(QWidget):
     def clock_time_ready(self, text):
         self.pending_clock = text
         self.lbl_clock_time.setText("Время отправки: " + text)
-        self.lbl_clock_status.setText("Отправка хостом: стиль №1, " + text + "…")
+        self.lbl_clock_status.setText("Отправка…")
 
     def apply_clock(self):
         if self.worker is not None or self.s["lcd_mode"] != "clock":
@@ -512,15 +595,13 @@ class LcdPage(QWidget):
         if not self.confirm_previous():
             return
         answer = QMessageBox.question(
-            self, "Часы на LCD", "Отправить местное время системы и включить часы, стиль №1?\n"
-            "Время будет получено непосредственно перед отправкой. Подтверждения от LCD нет.\n"
-            "На время передачи драйвер HID временно отключится",
+            self, "Показать часы?", f"Стиль {self.s['clock_style']} · время из системы.\nКартинка на экране будет заменена.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.pending_clock = ""
         self.lbl_clock_status.setText("Подготовка отправки часов…")
-        self.start_worker([], "clock:1", "clock")
+        self.start_worker([], f"clock:{self.s['clock_style']}", "clock")
 
     def update_brightness_label(self):
         value = self.sld_brightness.value()
@@ -552,9 +633,7 @@ class LcdPage(QWidget):
             return
         answer = QMessageBox.question(
             self, "Яркость и питание LCD",
-            f"Отправить яркость {value}%" + (" (выключение LCD)" if value == 0 else "") +
-            "?\nЗапись во флеш экрана, не двигай ползунок непрерывно.\n"
-            "Подтверждения приёма от LCD нет.\nНа время передачи драйвер HID временно отключится",
+            ("Выключить экран?" if value == 0 else f"Установить яркость {value}%?") + "\nНастройка сохранится в памяти экрана.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -563,57 +642,41 @@ class LcdPage(QWidget):
         self.start_worker(core.build_brightness_plan(value), f"brightness:{value}", "brightness")
 
     def background_value(self):
-        return self.custom_background if self.cmb_bg.currentData() == "custom" else self.cmb_bg.currentData()
+        return "black"
 
-    def pick_background(self):
-        color = QColorDialog.getColor(QColor(self.background_value()), self, "Фон прозрачности")
-        if color.isValid():
-            self.custom_background = color.name()
-            self.cmb_bg.setCurrentIndex(self.cmb_bg.findData("custom"))
-            self.changed()
+    def select_position(self, angle):
+        self.s["screen_pos"] = angle
+        self.changed()
 
     def update_orientation(self):
-        self.lbl_orientation.setText("Примерный вид, стиль 1" if self.s["lcd_mode"] == "clock" else
-                                     f"{core.W} × {core.H} · {Path(self.src).name if self.src else '—'}")
-        self.lbl_orientation.setToolTip(f"Поворот картинки {self.s['rotate']}°")
+        position = int(self.s["screen_pos"])
+        width, height = (core.H, core.W) if position in (90, 270) else (core.W, core.H)
+        self.lbl_orientation.setText(f"{width} × {height} · положение {position}°")
+        self.lbl_orientation.setToolTip("")
+        self.lbl_clock_position.setVisible(position != 0)
+        self.resize_preview()
 
     # --- настройки
-    def fps_value(self):
-        t = self.edt_fps.text().strip()
-        if not t:
-            return None
-        if not re.fullmatch(r"\d+(\.\d+)?(/\d+)?", t) or t.startswith("0"):
-            raise core.S360Error("FPS: число или дробь, например 10 или 20/3")
-        return t
-
     def apply_enc(self):
-        core.ENC.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
+        core.ENC.update(fps="60", max_seconds=15,
                         scale=self.cmb_scale.currentData(), focus_x=0.5,
-                        focus_y=0.5, rotate=int(self.cmb_rot.currentData()),
+                        focus_y=0.5, rotate=0, orient=int(self.s["screen_pos"]),
                         background=self.background_value(),
                         edge_trim=self.spn_trim.value())
 
     def changed(self, *_):
-        self.s["rotate"] = int(self.cmb_rot.currentData())
+        self.s["rotate"] = 0
         self.update_orientation()
-        self.btn_bg.setEnabled(self.cmb_bg.currentData() == "custom")
-        color = QColor(self.background_value())
-        self.bg_sample.setStyleSheet(f"background-color: {color.name()}; border: 1px solid {theme.COLORS['border']}; border-radius: {theme.RADII[0]}px;")
-        self.bg_sample.setToolTip(self.background_value())
         try:
-            self.s.update(fps=self.fps_value(), max_seconds=self.spn_sec.value() or None,
+            self.s.update(fps="60", max_seconds=15,
                           scale=self.cmb_scale.currentData(), focus_x=0.5,
                           focus_y=0.5, with_select=True,
-                          rotate=int(self.cmb_rot.currentData()),
+                          rotate=0,
                           background=self.background_value(),
                           edge_trim=self.spn_trim.value())
             save_ui_settings(self.s)
         except (core.S360Error, OSError):
             pass
-        self.lbl_full_gif.setVisible(self.spn_sec.value() == 0 or
-                                     (self.source_duration is not None and self.spn_sec.value() >= self.source_duration))
-        self.bg_sample.setVisible(self.cmb_bg.currentData() == "custom")
-        self.btn_bg.setVisible(self.cmb_bg.currentData() == "custom")
         self.timer.start(300)
         self.footer_changed.emit()
 
@@ -645,7 +708,6 @@ class LcdPage(QWidget):
             self.lbl_file_details.setText(f"{stream['width']}×{stream['height']} · {timing}")
         except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
             pass
-        self.spn_sec.setSpecialValueText(f"{self.source_duration:.2f}".replace(".", ",") if self.source_duration else "весь GIF")
         self.changed()
 
     def update_preview(self):
@@ -654,7 +716,7 @@ class LcdPage(QWidget):
         try:
             self.apply_enc()
             png = Path(self.tmp.name) / "preview.png"
-            core.preview_png(Path(self.src), png)
+            core.preview_png(Path(self.src), png, viewer=True)
             # Загрузка байтов исключает возврат старого кадра из файлового кеша Qt.
             self.preview_pixmap = QPixmap()
             self.preview_pixmap.loadFromData(png.read_bytes())
@@ -669,7 +731,7 @@ class LcdPage(QWidget):
         if st and st["status"] in ("IN_PROGRESS", "UNCERTAIN"):
             r = QMessageBox.question(
                 self, "Прошлая операция не завершена",
-                f"Прошлая операция: {st['status']}. Состояние экрана неизвестно.\nЯ проверил экран и хочу продолжить?",
+                "Состояние экрана неизвестно.\nЭкран проверен — продолжить?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
             return r == QMessageBox.StandardButton.Yes
         return True
@@ -685,13 +747,13 @@ class LcdPage(QWidget):
             button.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.prog.setValue(0)
-        self.log.appendPlainText(f"отправка ({kind}): {2 if kind == 'clock' else len(plan)} пакетов, {sha[:16]}")
+        self.log.appendPlainText("Отправка…")
         self.prog.show()
         self.log.show()
         self.btn_cancel.show()
         self.transfer_states[self.s["lcd_mode"]] = ("Отправка", "Хост отправляет; приём LCD не подтверждён")
         self.footer_changed.emit()
-        self.worker = SendWorker(plan, True, sha, kind)
+        self.worker = SendWorker(plan, True, sha, kind, clock_style=self.s["clock_style"])
         self.worker.clock_time.connect(self.clock_time_ready)
         self.worker.progress.connect(self.on_progress)
         self.worker.done_ok.connect(self.on_done)
@@ -717,20 +779,16 @@ class LcdPage(QWidget):
         if not self.confirm_previous():
             return
         slot = core.slot_for_direction(int(self.s["device_direction"]))
-        ref = "совпадает с проверенным эталоном" if sha == core.REFERENCE_SHA256 else \
-            "НЕ эталонный файл: прошивка принимала файлы такого вида (baseline), но каждый новый — на твой риск"
         dur, frames, rate = core.probe_mp4(data)
-        info = f"\nДлительность: {dur:.2f} с, кадров: {frames}, fps: {rate}" if dur is not None else ""
+        duration = f"{dur:g}".replace(".", ",") + " с" if dur is not None else "длительность неизвестна"
         try:
             above_tested = (dur is not None and dur > 8.95) or (bool(rate) and Fraction(rate) > 60)
         except (ValueError, ZeroDivisionError):
             above_tested = dur is not None and dur > 8.95
-        extra = ("\n\nПараметры выше проверенного: 8,95 с / 60 кадров/с. Возможно зависание картинки; "
-                 "восстановить можно через MSI Center.") if above_tested else ""
+        extra = "\nФайл длиннее проверенного — возможен сбой." if above_tested else ""
         r = QMessageBox.question(
-            self, "Подтверждение",
-            f"Файл: {len(data)} байт{info}\nSHA256: {sha[:16]}…\n{ref}\n\nЭто ПЕРЕЗАПИШЕТ слот на экране "
-            f"({slot.decode()}). Отката нет.{extra}\nНа время передачи драйвер HID временно отключится\nОтправить?",
+            self, "Загрузить на экран?",
+            f"{Path(self.src).name} · {duration} · {len(data) / 1024:.0f} КБ\nКартинка на экране будет заменена.{extra}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if r != QMessageBox.StandardButton.Yes:
             return
@@ -762,17 +820,17 @@ class LcdPage(QWidget):
         self.changed()
 
     def on_done(self):
-        self.transfer_states[self.s["lcd_mode"]] = ("Отправлено", "Хост отправил; приём LCD не подтверждён")
+        self.transfer_states[self.s["lcd_mode"]] = ("Отправлено", "Отправлено")
         self.finish_ui()
         if self.pending_clock is not None:
-            self.lbl_clock_status.setText(
-                f"Хост отправил: часы, стиль №1, {self.pending_clock}. Приём LCD не подтверждён.")
+            self.lbl_clock_status.setText("Отправлено")
+            self.lbl_clock_status.setToolTip(f"Время отправки: {self.pending_clock}; приём LCD не подтверждён")
             self.pending_clock = None
         if self.pending_brightness is not None:
             self.brightness_baseline = self.pending_brightness
             self.update_brightness_label()
-            self.lbl_brightness_status.setText(
-                f"Хост отправил: {self.pending_brightness}%. Приём LCD не подтверждён.")
+            self.lbl_brightness_status.setText("Отправлено")
+            self.lbl_brightness_status.setToolTip("Хост отправил; приём LCD не подтверждён")
             self.pending_brightness = None
         if self.pending_dir is not None:
             self.s["device_direction"] = self.pending_dir
@@ -786,24 +844,23 @@ class LcdPage(QWidget):
             save_ui_settings(self.s)
         except OSError as e:
             QMessageBox.warning(self, "Настройки не сохранены", str(e))
-        self.log.appendPlainText("хост отправил все пакеты")
-        QMessageBox.information(self, "Готово (хост)", "Все пакеты отправлены. Подтверждения от экрана нет — посмотрите, "
-                                "что на нём отображается.")
+        self.log.appendPlainText("Отправлено")
+        QMessageBox.information(self, "Отправлено", "Хост отправил. Приём экраном не подтверждён.")
 
     def on_failed(self, msg, uncertain):
-        self.transfer_states[self.s["lcd_mode"]] = ("Ошибка отправки", "Состояние LCD неизвестно; проверь экран")
+        self.transfer_states[self.s["lcd_mode"]] = ("Ошибка", f"Ошибка: {msg}")
         if self.pending_clock is not None:
-            self.lbl_clock_status.setText("Ошибка отправки часов; состояние LCD неизвестно. " + msg)
+            self.lbl_clock_status.setText("Ошибка: " + msg)
             self.pending_clock = None
         if self.pending_brightness is not None:
             self.lbl_brightness_status.setText(
-                "Ошибка отправки яркости; состояние LCD неизвестно. Выбор остаётся локальным. " + msg)
+                "Ошибка: " + msg)
             self.pending_brightness = None
         self.pending_dir = None
         self.pending_file = None
         self.finish_ui()
-        self.log.appendPlainText(f"ОШИБКА: {msg}")
-        QMessageBox.critical(self, "Ошибка", msg + ("\n\nСостояние экрана неизвестно. Повторять автоматически не нужно."
+        self.log.appendPlainText(f"Ошибка: {msg}")
+        QMessageBox.critical(self, "Ошибка", msg + ("\nСостояние экрана неизвестно."
                                                     if uncertain else ""))
 
 
@@ -920,16 +977,20 @@ class CurveCard(QGroupBox):
         for index in range(4):
             chips.addWidget(muted(f"Точка {index + 1}"), 0, index)
             pair = QWidget()
-            row = QHBoxLayout(pair)
+            row = QVBoxLayout(pair)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(4)
             inputs = {}
-            for key, suffix in (("temp", "°"), ("duty", "%")):
+            for key, suffix in (("temp", " °C"), ("duty", " %")):
                 spin = QSpinBox()
                 spin.setRange(core.PUMP_MIN_DUTY if channel == "pump" and key == "duty" else 0, 100)
                 spin.setSuffix(suffix)
                 spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-                spin.setMinimumWidth(48)
+                text_width = spin.fontMetrics().horizontalAdvance("100 °C") + 16
+                spin.setMinimumWidth(text_width + 16)
+                # Qt/QSS с NoButtons может оставить внутреннему редактору ширину 1 px.
+                spin.lineEdit().setMinimumWidth(text_width)
+                spin.setProperty("curveInput", True)
                 spin.setAccessibleName(f"{title}, точка {index + 1}, {'температура' if key == 'temp' else 'мощность'}")
                 spin.setKeyboardTracking(False)
                 spin.setCorrectionMode(QSpinBox.CorrectionMode.CorrectToNearestValue)
@@ -1039,7 +1100,6 @@ class CoolingPage(QWidget):
                                        "Показан образец; исходный файл не изменён.")
         self.saved_curves = deepcopy(self.curves)
         self.saved_mode = self.mode()
-        self.cooler_connection = muted("")
         self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
@@ -1055,38 +1115,19 @@ class CoolingPage(QWidget):
         actions.addWidget(self.btn_save_curves)
         actions.addWidget(self.btn_apply)
         lay.addLayout(actions)
-        self.btn_details = QToolButton()
-        self.btn_details.setText("Подробности")
-        self.btn_details.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.btn_details.setCheckable(True)
-        lay.addWidget(self.btn_details)
-        self.details = QWidget()
-        dl = QVBoxLayout(self.details)
-        dl.addWidget(self.cooler_connection)
-        dl.addWidget(self.curves_status)
-        dl.addWidget(self.dirty)
-        dl.addWidget(muted(f"Сервис {UNIT}: режим d0 40/41, температура CPU d0 85 "
-                           f"каждые {core.FEED_INTERVAL_S:g} с. Доступ через hidraw.\n"
-                           f"Профиль: {core.CURVES_FILE}\nРежим: {core.COOLING_ENV}\n"
-                           "Если установленная копия устарела, обнови её через ./install.sh вручную."))
-        self.last_mode = muted("")
-        dl.addWidget(self.last_mode)
-        self.btn_service = QPushButton("Остановить передачу температуры")
-        dl.addWidget(self.btn_service)
-        self.chk_auto = QCheckBox("Запускать при входе в систему")
-        dl.addWidget(self.chk_auto)
-        self.btn_reset_curves = QPushButton("Сбросить видимые точки к образцу")
-        dl.addWidget(self.btn_reset_curves)
-        dl.addWidget(muted("RPM и температура жидкости недоступны: чтение не реализовано.\n"
-                           "Поведение после остановки передачи температуры не проверено владельцем."))
-        lay.addWidget(self.details)
-        self.details.hide()
-        self.btn_details.toggled.connect(self.show_details)
+        self.btn_service = QPushButton("Остановить")
+        self.btn_service.setToolTip("Остановить передачу температуры и отключить автозапуск")
+        actions.insertWidget(1, self.btn_service)
+        self.btn_reset_curves = QPushButton("Сбросить до стандартных")
+        lay.addWidget(self.btn_reset_curves, 0, Qt.AlignmentFlag.AlignLeft)
+        # Эти локальные сообщения объединяются в одну строку состояния внизу.
+        for label in (self.curves_status, self.dirty):
+            label.setParent(self)
+            label.hide()
         self.btn_save_curves.clicked.connect(self.save_curves)
         self.btn_reset_curves.clicked.connect(self.reset_curves)
         self.btn_apply.clicked.connect(self.apply)
         self.btn_service.clicked.connect(self.stop)
-        self.chk_auto.clicked.connect(self.autostart)
         for button in self.buttons.values():
             button.toggled.connect(self.mode_changed)
         lay.addStretch()
@@ -1123,9 +1164,6 @@ class CoolingPage(QWidget):
         self.cards_layout.setColumnStretch(0, 2)
         self.cards_layout.setColumnStretch(1, 0 if narrow else 1)
 
-    def show_details(self, checked):
-        self.details.setVisible(checked)
-
     def mode(self):
         return next((key for key, b in self.buttons.items() if b.isChecked()), "balance")
 
@@ -1137,7 +1175,7 @@ class CoolingPage(QWidget):
         self.hint.setText("Выбери компонент. Точки можно перетаскивать или вводить числом." if custom else "")
         self.hint.setVisible(custom)
         self.layout_components()
-        self.btn_reset_curves.setEnabled(custom)
+        self.btn_reset_curves.setVisible(custom)
         self.update_dirty()
 
     def update_dirty(self):
@@ -1237,8 +1275,7 @@ class CoolingPage(QWidget):
             QMessageBox.warning(self, "Некорректный профиль", str(e))
             return
         answer = QMessageBox.question(self, "Применить охлаждение",
-            f"Применить «{COOLING_TITLES[mode]}» и запустить передачу температуры процессора?\n"
-            "Работа режимов подтверждена владельцем; обратного чтения настроек нет.",
+            f"Включить «{COOLING_TITLES[mode]}»?\nПередача температуры запустится автоматически.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -1256,6 +1293,9 @@ class CoolingPage(QWidget):
             return
         self.service_error = ""
         self.set_service_status("Запускается", "Запускается передача температуры процессора…", WARN)
+        if not self.autostart(True):
+            self.refresh()
+            return
         code, out = systemctl(command, UNIT)
         if code != 0:
             self.service_error = out or "Не удалось запустить сервис"
@@ -1275,13 +1315,15 @@ class CoolingPage(QWidget):
             QMessageBox.warning(self, "Сервис не остановлен", out or "Не удалось остановить")
         else:
             self.service_error = ""
+            self.autostart(False)
         self.refresh()
 
     def autostart(self, checked):
         code, out = systemctl("enable" if checked else "disable", UNIT)
         if code != 0:
             QMessageBox.warning(self, "Ошибка", out)
-        self.refresh()
+            return False
+        return True
 
     def journal_line(self):
         try:
@@ -1293,20 +1335,12 @@ class CoolingPage(QWidget):
 
     def refresh(self):
         inst = unit_installed()
-        connected = core.usb_present(core.COOLER_VID, core.COOLER_PID)
-        self.cooler_connection.setText("Контроллер охлаждения подключён" if connected else "Контроллер охлаждения не найден")
         self.btn_apply.setEnabled(inst)
         self.btn_apply.setToolTip("" if inst else "Сервис не установлен: выполни ./install.sh вручную")
-        self.chk_auto.setEnabled(inst)
+        self.btn_service.setVisible(False)
         self.btn_service.setEnabled(False)
-        try:
-            last = COOLING_TITLES.get(json.loads(core.COOLING_STATE.read_text())["mode"], "неизвестный")
-        except (OSError, ValueError, KeyError, TypeError):
-            last = "нет данных"
-        self.last_mode.setText(f"Последний отправленный режим: {last}. Обратного чтения с устройства нет.")
         if not inst:
             self.set_service_status("Остановлен", "Сервис не установлен — выполни ./install.sh вручную", WARN)
-            self.chk_auto.setChecked(False)
             return
         code, state = systemctl("is-active", UNIT)
         # Restart=on-failure может скрыть падение за состоянием activating (auto-restart).
@@ -1317,77 +1351,55 @@ class CoolingPage(QWidget):
             restart_error = (properties.get("SubState") == "auto-restart"
                              and properties.get("Result") not in (None, "success"))
         self.status.setToolTip("")
-        self.chk_auto.setChecked(systemctl("is-enabled", UNIT)[1] == "enabled")
         if state not in ("active", "inactive", "failed", "activating", "reloading", "deactivating"):
-            self.set_service_status("Неизвестно", "Статус сервиса неизвестен", WARN)
+            self.set_service_status("Ошибка", "Статус сервиса неизвестен", WARN)
             self.status.setToolTip(state)
         elif state == "failed" or restart_error or self.service_error:
-            self.set_service_status("Ошибка", "Ошибка сервиса: " + (self.service_error or "Передача температуры остановлена")
-                                    + "; " + self.journal_line(), BAD)
+            self.set_service_status("Ошибка", "Ошибка сервиса: " + self.journal_line()[:240]
+                                    + ". Если установленная копия устарела: ./install.sh", BAD)
         elif code == 0 and state == "active":
             self.set_service_status("Работает", "Сервис передачи температуры процессора работает; приём не подтверждён", OK)
             self.btn_service.setEnabled(True)
+            self.btn_service.setVisible(True)
         elif state in ("activating", "reloading"):
             self.set_service_status("Запускается", "Запускается передача температуры процессора…", WARN)
         elif state in ("inactive", "deactivating"):
-            self.set_service_status("Остановлен", "Передача температуры процессора остановлена — охлаждение без неё не проверено", WARN)
+            self.set_service_status("Остановлен", "Передача температуры процессора остановлена", WARN)
         else:
-            self.set_service_status("Неизвестно", "Статус сервиса неизвестен", WARN)
+            self.set_service_status("Ошибка", "Статус сервиса неизвестен", WARN)
             self.status.setToolTip(state)
 
 
-class MonitoringPage(QWidget):
-    def __init__(self):
-        super().__init__()
-        lay = QVBoxLayout(self)
-        box = QGroupBox("Доступно")
-        form = QFormLayout(box)
-        self.cpu = QLabel()
-        form.addRow("Температура CPU (hwmon)", self.cpu)
-        lay.addWidget(box)
-        na = QGroupBox("Недоступно")
-        nl = QVBoxLayout(na)
-        nl.addWidget(muted("Обороты помпы и вентиляторов, температура жидкости: статус кулера (d0 31) требует запроса "
-                           "на запись, а соответствие каналов физическим вентиляторам не сверено с MSI Center — "
-                           "показывать эти числа как достоверные нельзя."))
-        lay.addWidget(na)
-        lay.addStretch()
-        self.refresh()
-
-    def refresh(self):
-        try:
-            self.cpu.setText(f"{core.read_cpu_temp()} °C")
-        except core.S360Error as e:
-            self.cpu.setText(str(e))
-
-
 class SettingsPage(QWidget):
+    theme_changed = Signal(str)
+
     def __init__(self, settings):
         super().__init__()
         self.s = settings
         lay = QVBoxLayout(self)
-        box = QGroupBox("О программе")
-        form = QFormLayout(box)
-        for k, v in (("Версия", core.VERSION), ("Настройки", str(core.SETTINGS)), ("Журнал LCD", str(core.STATE)),
-                     ("Состояние кулера", str(core.COOLING_STATE))):
-            lbl = QLabel(v)
-            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            form.addRow(k, lbl)
+        box = QGroupBox("Тема")
+        row = QHBoxLayout(box)
+        group = QButtonGroup(self)
+        self.theme_buttons = {}
+        for name, title in (("dark", "Тёмная"), ("light", "Светлая"), ("oled", "OLED")):
+            button = QPushButton(title)
+            button.setCheckable(True)
+            button.setChecked(name == self.s["theme"])
+            group.addButton(button)
+            row.addWidget(button)
+            self.theme_buttons[name] = button
+            button.clicked.connect(lambda checked=False, name=name: self.choose_theme(name))
         lay.addWidget(box)
-        btn = QPushButton("Сбросить настройки интерфейса")
-        btn.clicked.connect(self.reset)
-        lay.addWidget(btn)
-        lay.addWidget(muted("Журнал LCD не удаляется кнопкой намеренно: он защищает от повторной записи при неизвестном "
-                            "состоянии экрана."))
+        lay.addWidget(muted(f"Версия: {core.VERSION}"))
         lay.addStretch()
 
-    def reset(self):
+    def choose_theme(self, name):
+        self.s["theme"] = name
+        self.theme_changed.emit(name)
         try:
-            save_ui_settings(UI_DEFAULT_SETTINGS)
+            save_ui_settings(self.s)
         except OSError as e:
-            QMessageBox.warning(self, "Настройки не сброшены", str(e))
-            return
-        QMessageBox.information(self, "S360", "Настройки сброшены. Перезапусти приложение.")
+            QMessageBox.warning(self, "Настройки не сохранены", str(e))
 
 
 class MainWindow(QMainWindow):
@@ -1398,7 +1410,6 @@ class MainWindow(QMainWindow):
         self.resize(1040, 720)
         settings = load_ui_settings()
         self.settings = settings
-        overview = QTabWidget()
         dashboard = DashboardPage(settings)
         self.dashboard = dashboard
         self.overview_states = QStackedWidget()
@@ -1421,18 +1432,16 @@ class MainWindow(QMainWindow):
         content.addWidget(self.state_detail)
         content.addStretch()
         state_layout.addWidget(box, 1)
+        actions = QHBoxLayout()
+        self.btn_check = QPushButton("Проверить подключение")
+        self.btn_check.clicked.connect(self.tick)
+        actions.addWidget(self.btn_check)
+        actions.addStretch()
+        content.addLayout(actions)
         self.overview_states.addWidget(state_page)
-        overview.addTab(self.overview_states, "Состояние")
-        overview.tabBar().hide()
-        overview.addTab(MonitoringPage(), "Мониторинг")
-        overview.addTab(SettingsPage(settings), "Настройки")
-        menu = self.menuBar().addMenu("Дополнительно")
-        menu.addAction("Мониторинг", lambda: overview.setCurrentIndex(1))
-        menu.addAction("Настройки", lambda: overview.setCurrentIndex(2))
-        menu.addAction("Обзор", lambda: overview.setCurrentIndex(0))
-        overview.currentChanged.connect(self.tick)
-        self.pages = [("Обзор", overview), ("LCD-дисплей", LcdPage(settings)),
-                      ("Охлаждение", CoolingPage(settings))]
+        self.pages = [("Мониторинг", self.overview_states), ("LCD-дисплей", LcdPage(settings)),
+                      ("Охлаждение", CoolingPage(settings)), ("Настройки", SettingsPage(settings))]
+        self.pages[3][1].theme_changed.connect(self.apply_theme)
         self.stack = QStackedWidget()
         self.tabs = QTabBar()
         self.tabs.setExpanding(False)
@@ -1448,7 +1457,6 @@ class MainWindow(QMainWindow):
                 scroll.setWidgetResizable(True)
                 scroll.setWidget(page)
                 self.stack.addWidget(scroll)
-        dashboard.configure_lcd.connect(lambda: self.stack.setCurrentIndex(1))
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(theme.SPACING[2], theme.SPACING[1], theme.SPACING[2], theme.SPACING[1])
@@ -1473,16 +1481,12 @@ class MainWindow(QMainWindow):
         self.lcd_status = QLabel("Состояние LCD не считано. Приём не подтверждён.")
         self.lcd_badge = QLabel("● Не считано")
         self.overview_badge = QLabel("● Подключение")
-        self.btn_check = QPushButton("Проверить подключение")
-        self.btn_check.setObjectName("primary")
-        self.btn_check.clicked.connect(self.tick)
-        self.btn_first_run = QPushButton("Выбрать файл")
-        self.btn_first_run.setObjectName("primary")
-        self.btn_first_run.clicked.connect(self.complete_first_run)
+        dashboard.status_changed.connect(self.refresh_overview_state)
         rows = (
-            (self.overview_badge, self.connection_status, (dashboard.btn_configure, self.btn_check, self.btn_first_run)),
+            (self.overview_badge, self.connection_status, ()),
             (self.lcd_badge, self.lcd_status, (lcd.btn_cancel, lcd.btn_send, lcd.btn_clock)),
             (cooling.service_badge, cooling.status, (cooling.btn_save_curves, cooling.btn_apply)),
+            (QLabel("● Настройки"), QLabel("Тема применяется сразу"), ()),
         )
         for status_badge, explanation, buttons in rows:
             row = QWidget()
@@ -1495,6 +1499,8 @@ class MainWindow(QMainWindow):
             explanation.setMinimumWidth(0)
             explanation.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             row_layout.addWidget(status_badge)
+            if status_badge is cooling.service_badge:
+                row_layout.addWidget(cooling.btn_service)
             row_layout.addWidget(explanation, 1)
             for button in buttons:
                 # Переносим сами кнопки: обработчики и подтверждения остаются прежними.
@@ -1508,10 +1514,25 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self.stack.setCurrentIndex)
         self.stack.currentChanged.connect(self.on_row)
         self.stack.setCurrentIndex(0)
+        self.apply_theme(settings["theme"])
         self.on_row(self.stack.currentIndex())
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(2000)
+
+    def apply_theme(self, name):
+        global OK, BAD, WARN, STYLE
+        theme.select_theme(name)
+        OK, BAD, WARN = (theme.COLORS[key] for key in ("good", "error", "warning"))
+        STYLE = theme.build_qss()
+        QApplication.instance().setStyleSheet(STYLE)
+        self.pages[1][1].update_clock_time()
+        self.pages[2][1].refresh()
+        self.update_lcd_footer()
+        self.tick()
+        for graph in self.findChildren(CurveGraph):
+            graph.update()
+        self.pages[1][1].preview_stack.update()
 
     def on_row(self, row):
         self.tabs.setCurrentIndex(row)
@@ -1525,7 +1546,7 @@ class MainWindow(QMainWindow):
         fallback = (("Не отправлено", "Время возьмётся из системы при отправке") if mode == "clock" else
                     ("Готово", "Файл подготовлен к отправке") if lcd.src else ("Готово", "Выбери GIF или MP4"))
         title, text = lcd.transfer_states.get(mode, fallback)
-        self.lcd_badge.setText(badge(title, BAD if title == "Ошибка отправки" else WARN if title == "Не отправлено" else OK))
+        self.lcd_badge.setText(badge(title, BAD if title == "Ошибка" else WARN if title == "Не отправлено" else OK))
         self.lcd_status.setText(text)
         self.lcd_status.setToolTip(text)
 
@@ -1547,7 +1568,7 @@ class MainWindow(QMainWindow):
             state = "missing"
             title, heading = "Подключение устройства", "Устройство не найдено"
             description = "Проверь питание и внутренний USB-кабель S360."
-            labels = {"missing": "—", "denied": "Нет доступа", "ready": "Подключён"}
+            labels = {"missing": "Не найден", "denied": "Нет доступа", "ready": "Подключён"}
             detail = f"LCD-дисплей: {labels[lcd]}\n\nКонтроллер охлаждения: {labels[cooler]}"
             status, explanation = "Не найдено", "S360 не обнаружен полностью"
         elif "denied" in (lcd, cooler):
@@ -1556,41 +1577,24 @@ class MainWindow(QMainWindow):
             description = "Установи правило доступа и переподключи кабель USB водянки."
             detail = "В терминале из папки приложения:\n\n./install.sh\n\nПосле установки нажми «Проверить подключение»."
             status, explanation = "Нет доступа", "Приложению нужны права на USB"
-        elif not self.settings.get("first_run_done"):
-            state = "first"
-            title, heading = "Начало работы", "Настрой экран и охлаждение S360"
-            description = "Устройство подключено. Начни с изображения на LCD."
-            detail = "1. Выбери GIF или MP4\n\n2. Проверь предпросмотр\n\n3. Загрузи файл на LCD"
-            status, explanation = "Готово", "Экран и контроллер охлаждения подключены"
         else:
             state = "overview"
-            title, heading, description, detail = "Обзор", "", "", ""
+            title, heading, description, detail = "Мониторинг", "", "", ""
             sent = self.settings.get("last_upload_time") is not None
             status = "Отправлено" if sent else "Готово"
             explanation = "Устройство не подтверждает результат" if sent else "Экран и контроллер охлаждения подключены"
+        if self.dashboard.cooler_error:
+            status, explanation = "Нет ответа от кулера", "Нет ответа от кулера"
         self.overview_state = state
         self.overview_states.setCurrentIndex(0 if state == "overview" else 1)
         self.state_heading.setText(heading)
         self.state_description.setText(description)
         self.state_detail.setText(detail)
-        self.dashboard.btn_configure.setVisible(state == "overview")
         self.btn_check.setVisible(state in ("missing", "denied"))
-        self.btn_first_run.setVisible(state == "first")
-        self.overview_badge.setText(badge(status, BAD if state == "denied" else OK if state in ("first", "overview") else WARN))
+        self.overview_badge.setText(badge(status, BAD if state == "denied" else WARN if self.dashboard.cooler_error else OK if state == "overview" else WARN))
         self.connection_status.setText(explanation)
         if self.stack.currentIndex() == 0:
             self.page_title.setText(title)
-
-    def complete_first_run(self):
-        self.settings["first_run_done"] = True
-        try:
-            save_ui_settings(self.settings)
-        except OSError as e:
-            self.settings["first_run_done"] = False
-            QMessageBox.warning(self, "Настройки не сохранены", str(e))
-            return
-        self.stack.setCurrentIndex(1)
-        self.pages[1][1].pick()
 
     def closeEvent(self, event):
         lcd = self.pages[1][1]
@@ -1598,6 +1602,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "S360", "Идёт передача на LCD. Остановите её и дождитесь завершения.")
             event.ignore()
             return
+        self.timer.stop()
+        self.dashboard.stop_polling()
         event.accept()
 
 

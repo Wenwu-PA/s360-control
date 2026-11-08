@@ -16,6 +16,9 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QLabel, QDialogButtonBox
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         import s360_lcd as core
 
         def forbidden(*args, **kwargs):
@@ -38,11 +41,11 @@ def main():
             window = gui.MainWindow()
             window.show(); window.stack.setCurrentIndex(1); app.processEvents()
             lcd = window.pages[1][1]
-            assert gui.load_ui_settings()["max_seconds"] == lcd.spn_sec.value() == 15
+            assert gui.load_ui_settings()["max_seconds"] == lcd.s["max_seconds"] == 15
             assert lcd.background_value() == "black"
             assert not any("Проверено на этом экране" in label.text() for label in lcd.findChildren(QLabel))
             assert not hasattr(lcd, "crop_dialog") and not hasattr(lcd, "direction_dialog")
-            assert set(lcd.mode_buttons) == {"media", "clock"} and lcd.edt_fps.text() == "60"
+            assert set(lcd.mode_buttons) == {"media", "clock"} and lcd.s["fps"] == "60"
             assert not hasattr(lcd, "advanced") and not hasattr(lcd, "chk_detach") and not hasattr(lcd, "chk_select")
             assert lcd.prog.isHidden() and lcd.log.isHidden() and lcd.btn_brightness.isHidden()  # 1
             with patch.object(lcd, "start_worker", side_effect=forbidden):
@@ -51,14 +54,14 @@ def main():
                 lcd.btn_brightness.click()
                 assert "42%" in question.call_args.args[2] and lcd.pending_brightness is None  # 2
             lcd.mode_buttons["clock"].click()
-            assert lcd.preview_stack.currentIndex() == 1 and lcd.lbl_orientation.text() == "Примерный вид, стиль 1"
+            assert lcd.preview_stack.currentIndex() == 1 and lcd.lbl_orientation.text() == "240 × 320 · положение 0°"
             assert "из системы · UTC" in lcd.lbl_clock_time.text()
             assert "Не отправлено" in window.lcd_badge.text() and "при отправке" in window.lcd_status.text()  # 3
             with patch.object(lcd, "start_worker") as start:
                 question.return_value = QMessageBox.StandardButton.Yes
                 lcd.btn_clock.click()
                 assert start.call_args.args == ([], "clock:1", "clock")
-                assert "На время передачи драйвер HID временно отключится" in question.call_args.args[2]
+                assert "HID" not in question.call_args.args[2] and len(question.call_args.args[2].splitlines()) == 2
                 lcd.pending_clock = None
                 lcd.btn_brightness.click()
                 assert start.call_args.args[1:] == ("brightness:42", "brightness")
@@ -71,13 +74,9 @@ def main():
                   patch.object(lcd, "update_preview")):
                 lcd.btn_pick.click()
             assert lcd.lbl_file_details.text() == "500×400 · 8,95 с" and lcd.s["max_seconds"] == 15
-            assert not lcd.lbl_full_gif.isHidden() and "globe.gif" in lcd.lbl_orientation.text()  # 5
-            lcd.spn_sec.setValue(3)
-            assert lcd.lbl_full_gif.isHidden() and lcd.s["max_seconds"] == 3
-            lcd.spn_sec.setValue(8.95)
-            assert not lcd.lbl_full_gif.isHidden()
-            lcd.spn_sec.setValue(0)
+            assert "globe.gif" in lcd.lbl_file.text() and not hasattr(lcd, "spn_sec")  # 5
             lcd.apply_enc()
+            assert core.ENC["max_seconds"] == 15 and core.ENC["fps"] == "60"
             assert core.ENC["focus_x"] == core.ENC["focus_y"] == .5  # 6
             lcd.s["with_select"] = False
             with (patch.object(core, "load_media", return_value=b"prepared"),
@@ -90,7 +89,25 @@ def main():
                 question.return_value = QMessageBox.StandardButton.Yes
                 lcd.btn_send.click()
                 assert start.call_args.args[0] == ["select", "upload"] and select.call_count == 1
-                assert "На время передачи драйвер HID временно отключится" in question.call_args.args[2]  # 7
+                assert "HID" not in question.call_args.args[2] and len(question.call_args.args[2].splitlines()) == 2  # 7
+            for position in (0, 90, 180, 270):
+                lcd.position_buttons[position].click()
+                lcd.apply_enc()
+                assert core.ENC["orient"] == position
+                width, height = (320, 240) if position in (90, 270) else (240, 320)
+                size = lcd.preview_stack.size()
+                assert size.width() * height == size.height() * width
+                assert f"{width} × {height} · положение {position}°" in lcd.lbl_orientation.text()
+                lcd.mode_buttons["clock"].click()
+                assert lcd.lbl_clock_position.isHidden() == (position == 0)
+                lcd.mode_buttons["media"].click()
+                with (patch.object(core, "load_media", return_value=b"prepared"),
+                      patch.object(core, "probe_mp4", return_value=(3, 100, "30")),
+                      patch.object(lcd, "start_worker", side_effect=forbidden)):
+                    question.return_value = QMessageBox.StandardButton.No
+                    lcd.send()
+                    assert "Положение экрана" not in question.call_args.args[2]
+            lcd.position_buttons[0].click()
             with (patch.object(core, "load_media", return_value=b"prepared"),
                   patch.object(lcd, "start_worker", side_effect=forbidden)):
                 question.return_value = QMessageBox.StandardButton.No
@@ -98,20 +115,20 @@ def main():
                                                  (8.96, "60", True), (2, "60001/1000", True)):
                     with patch.object(core, "probe_mp4", return_value=(duration, 100, rate)):
                         lcd.send()
-                    assert ("выше проверенного" in question.call_args.args[2]) == warning  # 8
+                    assert ("Файл длиннее проверенного" in question.call_args.args[2]) == warning  # 8
             saved = gui.load_ui_settings(); saved["fps"] = "20/3"; saved["edge_trim"] = 2
             saved.update(max_seconds=None, background="white", focus_x=.23, focus_y=.78)
             gui.save_ui_settings(saved)
             restored = gui.LcdPage(gui.load_ui_settings())
-            assert restored.edt_fps.text() == "20/3" and restored.spn_trim.value() == 2 and restored.spn_trim.isHidden()
-            assert restored.spn_sec.value() == 0 and restored.background_value() == "white"
+            assert restored.s["fps"] == "60" and restored.spn_trim.value() == 2 and restored.spn_trim.isHidden()
+            assert restored.s["max_seconds"] == 15 and restored.background_value() == "black"
             restored.apply_enc()
             assert core.ENC["focus_x"] == core.ENC["focus_y"] == .5
             restored.timer.stop(); restored.close()  # 9
             lcd.mode_buttons["clock"].click()
-            lcd.transfer_states["clock"] = ("Отправлено", "Хост отправил; приём LCD не подтверждён")
+            lcd.transfer_states["clock"] = ("Отправлено", "Отправлено")
             lcd.footer_changed.emit()
-            assert "Отправлено" in window.lcd_badge.text() and "не подтверждён" in window.lcd_status.text()
+            assert "Отправлено" in window.lcd_badge.text() and window.lcd_status.text() == "Отправлено"
             assert not errors and not core.STATE.exists()
             lcd.timer.stop(); window.timer.stop(); window.close(); app.processEvents()  # 10
             # Стандартные кнопки и штатный qtbase_ru, и запасные ручные подписи.
@@ -138,14 +155,11 @@ def main():
                 assert [message.button(getattr(QMessageBox.StandardButton, name)).text().replace("&", "")
                         for name in ("Yes", "No", "Cancel", "Close")] == ["Да", "Нет", "Отмена", "Закрыть"]
                 message.close()
-            with patch.object(QMessageBox, "information"):
-                window.pages[0][1].widget(2).reset()
-            assert gui.load_ui_settings() == gui.UI_DEFAULT_SETTINGS
 
         from check_t3 import check_rotation
         check_rotation(app, lcd, core, tmp)
         lcd.timer.stop()
-        print("T14 ok: 10 проверок; режимы, явное применение, подтверждения, метаданные, плитки, русские кнопки, сохранение, поворот кадров; отправок нет")
+        print("T14 ok: 10 проверок; режимы, явное применение, подтверждения, метаданные, фиксированные параметры, русские кнопки, сохранение, поворот кадров; отправок нет")
 
 
 if __name__ == "__main__":

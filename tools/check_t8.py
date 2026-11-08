@@ -16,6 +16,9 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from PySide6.QtWidgets import QApplication, QMessageBox
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         # Проверки прежних экранов: состояние подключения изолировано от хоста.
         patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
@@ -32,10 +35,12 @@ def main():
                 return (0 if state == "active" else 3), state
             if args[0] == "is-enabled":
                 return 1, "disabled"
-            assert args[0] in ("start", "restart", "stop")
+            assert args[0] in ("start", "restart", "stop", "enable", "disable")
             calls.append(args[0])
-            if fail:
+            if fail and args[0] == "restart":
                 return 1, "ошибка systemctl"
+            if args[0] in ("enable", "disable"):
+                return 0, ""
             if args[0] != "stop":
                 assert core.COOLING_ENV.read_text() == "MODE=custom\n"
                 assert core.load_curves() == page.editor_curves()
@@ -105,13 +110,13 @@ def main():
             assert core.CURVES_FILE.read_text() == saved  # Сброс пока только в редакторе.
             page.cards["radiator1"].move_point(0, 47, 21)
             page.btn_apply.click()
-            assert calls == ["restart"] and core.load_curves() == page.editor_curves()
+            assert calls == ["enable", "restart"] and core.load_curves() == page.editor_curves()
             assert core.load_curves()["radiator1"]["temp"][0] == 47
             assert core.load_settings()["cooling_mode"] == "custom"
             assert "не подтверждён" in page.status.text()
             page.btn_service.click()
             page.btn_apply.click()
-            assert calls[-2:] == ["stop", "restart"]
+            assert calls[-4:] == ["stop", "disable", "enable", "restart"]
             restored = gui.CoolingPage(core.load_settings())
             assert restored.mode() == "custom" and not restored.curves_box.isHidden()
             restored.close()
@@ -124,7 +129,7 @@ def main():
             assert "Ошибка сервиса" in page.status.text()
             connected = False
             page.refresh()
-            assert "не найден" in page.cooler_connection.text()
+            assert not hasattr(page, "cooler_connection")
             count = len(calls)
             page.btn_apply.click()
             assert len(calls) == count and warning.call_args.args[1] == "Устройство не найдено"

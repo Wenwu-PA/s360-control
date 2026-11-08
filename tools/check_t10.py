@@ -18,6 +18,9 @@ def main():
         from PySide6.QtGui import QMouseEvent
         from PySide6.QtWidgets import QApplication, QMessageBox
         import s360_gui as gui
+        # Опрос мониторинга изолирован: hidraw и nvidia-smi не вызываются.
+        patch.object(gui.monitor, "read_cooler_status", return_value={"rpm": {"radiator": 444, "pump": 2255}}).start()
+        patch.object(gui.monitor, "read_gpu_temps", return_value={}).start()
         # Проверки прежних экранов: состояние подключения изолировано от хоста.
         patch.object(gui, "device_access", return_value="ready").start()
         import s360_lcd as core
@@ -35,9 +38,10 @@ def main():
                 return (0 if state == 'active' else 3), ('activating' if state == 'auto-restart' else state)
             if command == 'is-enabled':
                 return 1, 'disabled'
-            assert command in ('restart', 'stop')
+            assert command in ('restart', 'stop', 'enable', 'disable')
             calls.append(command)
-            state = 'active' if command == 'restart' else 'inactive'
+            if command in ('restart', 'stop'):
+                state = 'active' if command == 'restart' else 'inactive'
             return 0, ''
 
         app = QApplication([])
@@ -62,7 +66,10 @@ def main():
             assert window.isVisible() and not errors  # 1: запуск настоящего GUI
             assert tuple(page.cards) == ('radiator1', 'waterblock', 'pump')
             assert not page.preset_box.isHidden() and page.curves_box.isHidden()  # 2
+            assert not hasattr(page, 'details') and not hasattr(page, 'chk_auto')
+            assert page.btn_reset_curves.isHidden()
             page.buttons['custom'].click()
+            assert not page.btn_reset_curves.isHidden()
             page.apply()
             assert not calls and 'Сохранить' in warning.call_args.args[2]  # 3: нет файла — нет запуска
             page.save_curves()
@@ -106,13 +113,15 @@ def main():
             page.reset_curves()
             assert all(page.raw_curves()[ch] == curves[ch] for ch in ('radiator2', 'radiator3'))
             page.apply()
-            assert calls == ['restart'] and core.load_curves() == page.editor_curves()
+            assert calls == ['enable', 'restart'] and core.load_curves() == page.editor_curves()
             assert core.COOLING_ENV.read_text() == 'MODE=custom\n' and 'работает' in page.status.text()  # 7
             for state in ('activating', 'auto-restart', 'failed', 'inactive', 'unknown'):
                 page.refresh()
                 expected = {'activating': 'Запускается', 'failed': 'Последняя ошибка из журнала',
                             'auto-restart': 'Последняя ошибка из журнала', 'inactive': 'остановлена', 'unknown': 'неизвестен'}[state]
-                assert expected in page.status.text()  # 8: честные статусы
+                assert expected in page.status.text() and page.btn_service.isHidden()  # 8
+                if state in ('failed', 'auto-restart'):
+                    assert './install.sh' in page.status.text()
             core.CURVES_FILE.write_text('{broken')
             before = len(calls)
             page.apply()
@@ -120,7 +129,7 @@ def main():
             page.buttons['balance'].click()
             assert page.curves_box.isHidden() and not page.preset_box.isHidden()
             page.apply()
-            assert core.COOLING_ENV.read_text() == 'MODE=balance\n' and len(calls) == before + 1
+            assert core.COOLING_ENV.read_text() == 'MODE=balance\n' and len(calls) == before + 2
             window.close()
             app.processEvents()
             assert not errors and not window.isVisible()  # 10: возврат в preset и закрытие

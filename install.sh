@@ -34,10 +34,12 @@ fi
 install -Dm644 "$HERE/s360_lcd.py" "$APP/s360_lcd.py"
 install -Dm644 "$HERE/s360_gui.py" "$APP/s360_gui.py"
 install -Dm644 "$HERE/theme.py" "$APP/theme.py"
+install -Dm644 "$HERE/monitor.py" "$APP/monitor.py"
 mkdir -p "$BIN"
 printf '#!/usr/bin/env bash\nexec python3 "%s/s360_gui.py" "$@"\n' "$APP" > "$BIN/s360-control"
 printf '#!/usr/bin/env bash\nexec python3 "%s/s360_lcd.py" "$@"\n' "$APP" > "$BIN/s360-lcd"
-chmod 755 "$BIN/s360-control" "$BIN/s360-lcd"
+printf '#!/usr/bin/env bash\nexec python3 "%s/monitor.py" "$@"\n' "$APP" > "$BIN/s360-monitor"
+chmod 755 "$BIN/s360-control" "$BIN/s360-lcd" "$BIN/s360-monitor"
 
 mkdir -p "$APPS"
 cat > "$APPS/s360-control.desktop" << DESK
