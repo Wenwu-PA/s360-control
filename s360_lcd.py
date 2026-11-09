@@ -189,8 +189,8 @@ W, H = 240, 320    # размер кадра эталонного MP4 (порт�
 ROT = {0: None, 90: "transpose=1", 180: "hflip,vflip", 270: "transpose=2"}   # поворот ИЗОБРАЖЕНИЯ по часовой
 
 
-def _bg_color():
-    c = str(ENC["background"] or "black").strip()
+def _bg_color(enc=None):
+    c = str((ENC if enc is None else enc).get("background") or "black").strip()
     if re.fullmatch(r"#[0-9a-fA-F]{6}", c):
         return "0x" + c[1:]
     if re.fullmatch(r"[a-zA-Z]+", c):
@@ -198,17 +198,17 @@ def _bg_color():
     raise S360Error("фон: имя цвета (black, white...) или #RRGGBB")
 
 
-def build_vf(fps=None, tail=None, viewer=False):
+def build_vf(fps=None, tail=None, viewer=False, enc=None):
     """Фильтр ffmpeg: [fps] -> поворот картинки -> прозрачность на фон (в исходном разрешении) -> масштаб под экран ->
-    компенсация положения экрана -> формат.
-    «Поворот картинки» (ENC["rotate"]) крутит само изображение по часовой стрелке.
-    «Положение экрана» (ENC["orient"]) — как физически повёрнут экран по часовой: 0/90/180/270. Кадр зрителя при 90/270
-    горизонтальный (320x240); в файл (всегда 240x320) картинка кладётся повёрнутой на (360 - положение), чтобы на повёрнутом
-    экране выглядеть прямо. viewer=True — кадр так, как его увидит зритель (для предпросмотра).
-    Команда поворота экрана (cmd 1a) здесь не отправляется. fit/fill/stretch — как раньше."""
-    mode, bg, rot = ENC["scale"], _bg_color(), int(ENC["rotate"])
-    orient = int(ENC.get("orient") or 0)
-    trim = int(ENC.get("edge_trim") or 0)
+    компенсация положения экрана -> формат. enc — словарь настроек поверх ENC (ENC не меняется; безопасно для потоков).
+    «Положение экрана» (orient): кадр зрителя при 90/270 горизонтальный (320x240), файл всегда 240x320; viewer=True — кадр глазами зрителя.
+    fit: картинка вписывается целиком, её положение в кадре задают focus_x/focus_y (0.5 = по центру);
+    fill: заполняет кадр, окно обрезки задают focus_x/focus_y; stretch: растягивается."""
+    E = dict(ENC)
+    E.update(enc or {})
+    mode, bg, rot = E["scale"], _bg_color(E), int(E["rotate"])
+    orient = int(E.get("orient") or 0)
+    trim = int(E.get("edge_trim") or 0)
     if rot not in ROT:
         raise S360Error("поворот: 0, 90, 180 или 270")
     if orient not in ROT:
@@ -216,9 +216,11 @@ def build_vf(fps=None, tail=None, viewer=False):
     if not 0 <= trim <= 3:
         raise S360Error("edge-trim: от 0 до 3")
     vw, vh = (H, W) if orient in (90, 270) else (W, H)
+    fx = min(1.0, max(0.0, float(E.get("focus_x", 0.5))))
+    fy = min(1.0, max(0.0, float(E.get("focus_y", 0.5))))
     parts = []
-    if fps or ENC["fps"]:
-        parts.append(f"fps={fps or ENC['fps']}")
+    if fps or E.get("fps"):
+        parts.append(f"fps={fps or E['fps']}")
     if ROT[rot]:
         parts.append(ROT[rot])
     parts.append("format=rgba")
@@ -226,9 +228,8 @@ def build_vf(fps=None, tail=None, viewer=False):
         parts.append("split[ea][eb];[ea]alphaextract" + ",erosion" * trim + "[em];[eb][em]alphamerge")
     parts.append(f"split[fg][t];[t]drawbox=x=0:y=0:w=iw:h=ih:color={bg}@1:t=fill[bgl];[bgl][fg]overlay=format=auto")
     if mode == "fit":
-        parts.append(f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2:{bg}")
+        parts.append(f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,pad={vw}:{vh}:(ow-iw)*{fx}:(oh-ih)*{fy}:{bg}")
     elif mode == "fill":
-        fx, fy = float(ENC["focus_x"]), float(ENC["focus_y"])
         parts.append(f"scale={vw}:{vh}:force_original_aspect_ratio=increase,"
                      f"crop={vw}:{vh}:(iw-{vw})*{fx}:(ih-{vh})*{fy}")
     elif mode == "stretch":
@@ -239,7 +240,7 @@ def build_vf(fps=None, tail=None, viewer=False):
     comp = (360 - orient) % 360
     if not viewer and ROT[comp]:
         parts.append(ROT[comp])
-    return ",".join(parts) + "," + (tail or f"format={ENC['pix_fmt']}")
+    return ",".join(parts) + "," + (tail or f"format={E['pix_fmt']}")
 
 
 def _run_ffmpeg(cmd, timeout):
@@ -266,11 +267,11 @@ def convert_gif(src: Path, dst: Path, fps=None):
     _run_ffmpeg(cmd + [str(dst)], 120)
 
 
-def preview_png(src: Path, dst: Path, viewer=False):
-    """Первый кадр с текущими настройками (без USB). viewer=True — кадр глазами зрителя (при положении 90/270 горизонтальный)."""
+def preview_png(src: Path, dst: Path, viewer=False, enc=None):
+    """Первый кадр с настройками (без USB). viewer=True — кадр глазами зрителя. enc — настройки поверх ENC (для фоновых потоков)."""
     Path(dst).unlink(missing_ok=True)
     _run_ffmpeg(["ffmpeg", "-hide_banner", "-loglevel", "error", "-n", "-i", str(src),
-                 "-vf", build_vf(None, tail="format=rgb24", viewer=viewer), "-frames:v", "1", str(dst)], 60)
+                 "-vf", build_vf(None, tail="format=rgb24", viewer=viewer, enc=enc), "-frames:v", "1", str(dst)], 60)
 
 
 def probe_mp4(data: bytes):

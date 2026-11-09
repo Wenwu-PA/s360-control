@@ -45,6 +45,17 @@ def ensure_thumb(src, cache_dir, timeout=20):
         return None
 
 
+def media_size(src, timeout=10):
+    """(ширина, высота) первого видеопотока через ffprobe или None. Нужна для сдвига картинки на предпросмотре (pan.py)."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(src)],
+                             capture_output=True, text=True, timeout=timeout, check=True).stdout.strip().splitlines()[0]
+        w, h = (int(x) for x in out.split(",")[:2])
+        return (w, h) if w > 0 and h > 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
 def selftest():
     import subprocess as sp, tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -65,8 +76,10 @@ def selftest():
         assert ensure_thumb(lib / "b.gif", cache) == t1 and t1.stat().st_mtime_ns == m1          # кэш используется
         assert ensure_thumb(lib / "broken.gif", cache) is None and not list(cache.glob("*.part.png"))
         assert ensure_thumb(lib / "missing.gif", cache) is None
+        assert media_size(lib / "b.gif") == (200, 100) and media_size(lib / "A.MP4") == (64, 64)
+        assert media_size(lib / "broken.gif") is None and media_size(lib / "missing.gif") is None
         os.utime(lib / "b.gif", (1, 1)); assert ensure_thumb(lib / "b.gif", cache) != t1          # файл изменился -> новая миниатюра
-    print("thumbs selftest ok: список, миниатюры 120x160, кэш, битые и отсутствующие файлы")
+    print("thumbs selftest ok: список, миниатюры 120x160, кэш, размеры, битые и отсутствующие файлы")
 
 
 if __name__ == "__main__":
