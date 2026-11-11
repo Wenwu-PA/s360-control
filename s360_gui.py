@@ -498,7 +498,7 @@ class DashboardPage(QWidget):
         upload_box = self.last_sent_box
         upload_row = QHBoxLayout(upload_box)
         self.last_sent = QLabel()
-        self.last_sent.setObjectName("preview")
+        self.last_sent.setObjectName("lastSentImage")
         self.last_sent.hide()
         upload_row.addWidget(self.last_sent, 0, Qt.AlignmentFlag.AlignVCenter)
         upload_form = QVBoxLayout()
@@ -510,7 +510,6 @@ class DashboardPage(QWidget):
         upload_form.addWidget(self.last_file)
         upload_form.addWidget(self.last_upload)
         upload_form.addStretch()
-        upload_form.addWidget(muted("Хост отправил. Проверь изображение на LCD: приём не подтверждён."))
         lay.addWidget(upload_box, 1, 1)
         lay.setColumnStretch(0, 1)
         lay.setColumnStretch(1, 2)
@@ -609,7 +608,8 @@ class DashboardPage(QWidget):
         when = self.s.get("last_upload_time")
         if when is not None:
             when = datetime.datetime.fromtimestamp(when).strftime("%d.%m.%Y %H:%M:%S")
-            self.last_upload.setText(f"{when} · Отправлено")
+            self.last_upload.setText(f"{when} · Отправлено с ПК · проверь LCD")
+            self.last_upload.setToolTip("Передача с компьютера завершена. LCD не подтверждает приём; проверь изображение на экране.")
         else:
             self.last_upload.setText("")
         image = QPixmap()
