@@ -100,7 +100,13 @@ def main():
                     x, y = lcd.lbl_prev.width() / 2, lcd.lbl_prev.height() / 2
                     mouse(QEvent.Type.MouseButtonPress, x, y)
                     assert lcd.lbl_prev.cursor().shape() == Qt.CursorShape.ClosedHandCursor
-                    mouse(QEvent.Type.MouseMove, x + 20, y + 20)
+                    count = len(calls)
+                    with (patch.object(lcd, 'update_preview', side_effect=forbidden),
+                          patch.object(gui, 'save_ui_settings', side_effect=forbidden)):
+                        mouse(QEvent.Type.MouseMove, x + 20, y + 20)
+                        assert lcd.lbl_prev.live and not lcd.lbl_prev.frame.isNull()
+                        app.processEvents()
+                    assert len(calls) == count
                     want = pan.drag('fill', .5, .5, 20 * 240 / lcd.lbl_prev.width(),
                                     20 * 320 / lcd.lbl_prev.height(), 400, 200, 240, 320)
                     assert (lcd.s['focus_x'], lcd.s['focus_y']) == want and want[1] == .5

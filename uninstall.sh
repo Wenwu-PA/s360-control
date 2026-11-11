@@ -14,8 +14,12 @@ fi
 rm -f "$HOME/.config/systemd/user/s360-feed.service"
 command -v systemctl >/dev/null && systemctl --user daemon-reload 2>/dev/null || true
 rm -rf "$APP"
-rm -f "$BIN/s360-control" "$BIN/s360-lcd" "$HOME/.local/share/applications/s360-control.desktop"
-echo "Приложение, лаунчеры, .desktop и сервис удалены."
+rm -f "$BIN/s360-control" "$BIN/s360-lcd" "$BIN/s360-monitor" "$HOME/.local/share/applications/s360-control.desktop"
+rm -f "$HOME/.local/share/icons/hicolor/512x512/apps/s360-control.png"
+if command -v gtk-update-icon-cache >/dev/null; then
+  gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+fi
+echo "Приложение, лаунчеры, значок, .desktop и сервис удалены."
 
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/s360-control"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/s360-lcd"

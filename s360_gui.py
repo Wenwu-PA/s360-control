@@ -33,6 +33,8 @@ import monitor
 import thumbs
 import pan
 
+APP_VERSION = "1.0.0"
+APP_ICON = Path(__file__).resolve().parent / "assets" / "s360-control.png"
 UNIT = "s360-feed.service"
 COOLING_TITLES = {"silent": "Тихий", "balance": "Сбалансированный", "game": "Игровой", "custom": "Свой профиль"}
 OK, BAD, WARN = (theme.COLORS[key] for key in ("good", "error", "warning"))
@@ -212,11 +214,26 @@ class ThumbWorker(QThread):
             self.ready.emit(self.generation, str(path), str(thumbnail) if thumbnail else "")
 
 
+def pan_frame(source, edge_trim):
+    """Uncropped first frame for local dragging; final output still uses core.preview_png."""
+    filters = ["format=rgba"]
+    if edge_trim:
+        filters.append("split[ea][eb];[ea]alphaextract" + ",erosion" * edge_trim + "[em];[eb][em]alphamerge")
+    # GUI uses black background and no content rotation, like the core pipeline.
+    filters.append("split[fg][t];[t]drawbox=x=0:y=0:w=iw:h=ih:color=black@1:t=fill[bgl];[bgl][fg]overlay=format=auto")
+    filters.append("scale=w='min(2048,iw)':h='min(2048,ih)':force_original_aspect_ratio=decrease,setsar=1,format=rgb24")
+    return subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(source),
+                           "-vf", ",".join(filters), "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"],
+                          capture_output=True, timeout=30, check=True).stdout
+
+
 class PreviewWorker(QThread):
-    def __init__(self, request, target, parent):
+    def __init__(self, request, target, parent, decode_frame=False):
         super().__init__(parent)
         self.request, self.target = request, target
         self.data, self.error = None, None
+        self.decode_frame = decode_frame
+        self.frame = None
 
     def run(self):
         source, enc = self.request
@@ -225,6 +242,11 @@ class PreviewWorker(QThread):
             self.data = self.target.read_bytes()
         except Exception as error:
             self.error = str(error)
+        if self.decode_frame and self.data:
+            try:
+                self.frame = pan_frame(source, int(enc["edge_trim"]))
+            except Exception:
+                pass  # A failed drag texture does not invalidate the exact preview.
 
 
 class PanPreview(QLabel):
@@ -236,6 +258,28 @@ class PanPreview(QLabel):
         super().__init__("Выбери файл")
         self.pannable = False
         self.anchor = None
+        self.frame = QPixmap()
+        self.live = False
+        self.geometry_settings = None
+
+    def show_position(self, mode, fx, fy, sw, sh):
+        self.geometry_settings = mode, fx, fy, sw, sh
+        self.live = not self.frame.isNull()
+        self.update()
+
+    def paintEvent(self, event):
+        if not self.live or self.frame.isNull() or self.geometry_settings is None:
+            super().paintEvent(event)
+            return
+        mode, fx, fy, sw, sh = self.geometry_settings
+        width, height = self.width(), self.height()
+        scale = (max if mode == "fill" else min)(width / sw, height / sh)
+        dw, dh = sw * scale, sh * scale
+        destination = QRectF((width - dw) * fx, (height - dh) * fy, dw, dh)
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawPixmap(destination, self.frame, QRectF(self.frame.rect()))
 
     def set_pannable(self, enabled):
         self.pannable = enabled
@@ -645,6 +689,7 @@ class LcdPage(QWidget):
         self.pending_file_path = None
         self.source_size = (0, 0)
         self.preview_stopped = False
+        self.pan_frame_key = None
         self.brightness_baseline = int(self.s["brightness"]) if self.s["lcd_enabled"] else 0
         self.transfer_states = {}
         self.tmp = tempfile.TemporaryDirectory()
@@ -721,7 +766,7 @@ class LcdPage(QWidget):
         self.pan_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_layout.addWidget(self.pan_note)
         self.lbl_prev.moved.connect(self.drag_preview)
-        self.lbl_prev.released.connect(self.update_preview)
+        self.lbl_prev.released.connect(self.finish_pan)
         self.lbl_prev.centered.connect(self.center_preview)
         self.clock_preview_note = muted("Время берётся из системы")
         self.clock_preview_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1015,8 +1060,18 @@ class LcdPage(QWidget):
                           dx * vw / self.lbl_prev.width(), dy * vh / self.lbl_prev.height(),
                           *self.source_size, vw, vh)
         self.s.update(focus_x=fx, focus_y=fy)
-        save_ui_settings(self.s)
+        self.lbl_prev.show_position(self.cmb_scale.currentData(), fx, fy, *self.source_size)
         self.timer.stop()
+        self.preview_pending = None
+        # Pointer motion only repaints the cached frame: no ffmpeg or disk I/O.
+        if self.lbl_prev.anchor is None:
+            self.finish_pan()
+
+    def finish_pan(self):
+        try:
+            save_ui_settings(self.s)
+        except OSError as error:
+            self.log.appendPlainText(f"Положение не сохранено: {error}")
         self.update_preview()
 
     def center_preview(self):
@@ -1060,6 +1115,9 @@ class LcdPage(QWidget):
         self.source_size = thumbs.media_size(self.src) or (0, 0)
         self.s.update(focus_x=0.5, focus_y=0.5)
         self.lbl_prev.clear()
+        self.lbl_prev.frame = QPixmap()
+        self.lbl_prev.live = False
+        self.pan_frame_key = None
         self.preview_bytes = None
         self.library.select_source(self.src)
         self.transfer_states.pop("media", None)
@@ -1096,7 +1154,9 @@ class LcdPage(QWidget):
 
     def start_preview(self):
         request, self.preview_pending = self.preview_pending, None
-        self.preview_worker = PreviewWorker(request, Path(self.tmp.name) / "preview.png", self)
+        frame_key = (request[0], request[1]["edge_trim"])
+        self.preview_worker = PreviewWorker(request, Path(self.tmp.name) / "preview.png", self,
+                                            decode_frame=self.pan_frame_key != frame_key)
         self.preview_worker.finished.connect(self.preview_finished)
         self.preview_worker.start()
 
@@ -1105,11 +1165,18 @@ class LcdPage(QWidget):
         worker.wait()
         self.preview_worker = None
         current = (self.src, self.encoding_settings())
+        frame_key = (worker.request[0], worker.request[1]["edge_trim"])
+        if not self.preview_stopped and frame_key == (self.src, current[1]["edge_trim"]) and worker.frame:
+            self.lbl_prev.frame.loadFromData(worker.frame)
+            if not self.lbl_prev.frame.isNull():
+                self.pan_frame_key = frame_key
         if not self.preview_stopped and worker.request == current:
             self.preview_source = self.src if worker.data else None
             self.preview_request = worker.request
             self.preview_bytes = worker.data
             if worker.data:
+                if self.lbl_prev.anchor is None:
+                    self.lbl_prev.live = False
                 self.preview_pixmap = QPixmap()
                 self.preview_pixmap.loadFromData(worker.data)
                 self.scale_preview()
@@ -1831,7 +1898,7 @@ class SettingsPage(QWidget):
             self.theme_buttons[name] = button
             button.clicked.connect(lambda checked=False, name=name: self.choose_theme(name))
         lay.addWidget(box)
-        lay.addWidget(muted(f"Версия: {core.VERSION}"))
+        lay.addWidget(muted(f"S360 Control {APP_VERSION} · ядро {core.VERSION}"))
         lay.addStretch()
 
     def choose_theme(self, name):
@@ -1848,6 +1915,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         theme.install_russian_translation(QApplication.instance())
         self.setWindowTitle("S360 Control")
+        self.setWindowIcon(QIcon(str(APP_ICON)))
         self.resize(1040, 720)
         settings = load_ui_settings()
         self.settings = settings
@@ -2055,6 +2123,8 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("S360 Control")
+    app.setApplicationVersion(APP_VERSION)
+    app.setWindowIcon(QIcon(str(APP_ICON)))
     app.setDesktopFileName("s360-control")
     app.setFont(theme.application_font())
     app.setStyleSheet(STYLE)

@@ -57,7 +57,7 @@ def main():
             page = window.pages[3][1]
             assert [box.title() for box in page.findChildren(QGroupBox)] == ['Тема']
             assert len(page.findChildren(QPushButton)) == 3
-            assert any(label.text() == f'Версия: {core.VERSION}' for label in page.findChildren(QLabel))  # 3
+            assert any(label.text() == f'S360 Control {gui.APP_VERSION} · ядро {core.VERSION}' for label in page.findChildren(QLabel))  # 3
             qss = set()
             for name in ('light', 'oled', 'dark'):
                 page.theme_buttons[name].click(); app.processEvents()

@@ -1,2 +1,11 @@
 __pycache__/
 *.pyc
+
+# Local environments, release bundles and source backups
+.s360-env/
+.venv/
+venv/
+dist/
+*.bak
+*.bak[0-9]*
+*.zip
