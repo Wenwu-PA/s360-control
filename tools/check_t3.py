@@ -96,15 +96,20 @@ def check_rotation(app, lcd, core, tmp):
                     focus = 50
                     lcd.changed()
                     loop = QEventLoop()
-                    QTimer.singleShot(350, loop.quit)
-                    loop.exec()  # Настоящий сигнал timeout обновляет предпросмотр.
+                    poll = QTimer()
+                    poll.timeout.connect(lambda: loop.quit() if lcd.preview_worker is None and not lcd.timer.isActive() else None)
+                    poll.start(10)
+                    QTimer.singleShot(5000, loop.quit)
+                    loop.exec()  # Дожидаемся фонового предпросмотра после timeout.
+                    poll.stop()
+                    assert lcd.preview_worker is None and not lcd.timer.isActive()
                     assert lcd.preview_stack.size() == frame_size
                     assert lcd.lbl_prev.size() == frame_size
                     assert lcd.lbl_prev.pixmap().size() == frame_size
                     preview = lcd.preview_pixmap.toImage()
                     fx = fy = focus / 100
                     verify(preview, angle, scale, fx, fy, 0)
-                    preview_params = dict(core.ENC)
+                    preview_params = lcd.encoding_settings()
                     lcd.send()
                     assert load.call_args.args == (src,)
                     assert core.ENC == preview_params

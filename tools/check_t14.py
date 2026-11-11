@@ -123,14 +123,14 @@ def main():
             assert restored.s["fps"] == "60" and restored.spn_trim.value() == 2 and restored.spn_trim.isHidden()
             assert restored.s["max_seconds"] == 15 and restored.background_value() == "black"
             restored.apply_enc()
-            assert core.ENC["focus_x"] == core.ENC["focus_y"] == .5
+            assert (core.ENC["focus_x"], core.ENC["focus_y"]) == (.23, .78)
             restored.timer.stop(); restored.close()  # 9
             lcd.mode_buttons["clock"].click()
             lcd.transfer_states["clock"] = ("Отправлено", "Отправлено")
             lcd.footer_changed.emit()
             assert "Отправлено" in window.lcd_badge.text() and window.lcd_status.text() == "Отправлено"
             assert not errors and not core.STATE.exists()
-            lcd.timer.stop(); window.timer.stop(); window.close(); app.processEvents()  # 10
+            lcd.timer.stop(); window.timer.stop(); app.processEvents()  # 10
             # Стандартные кнопки и штатный qtbase_ru, и запасные ручные подписи.
             for fallback in (False, True):
                 if fallback:
@@ -158,7 +158,7 @@ def main():
 
         from check_t3 import check_rotation
         check_rotation(app, lcd, core, tmp)
-        lcd.timer.stop()
+        lcd.timer.stop(); window.close(); app.processEvents()
         print("T14 ok: 10 проверок; режимы, явное применение, подтверждения, метаданные, фиксированные параметры, русские кнопки, сохранение, поворот кадров; отправок нет")
 
 

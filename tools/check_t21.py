@@ -56,9 +56,9 @@ def main():
             target.write_bytes(fixtures['thumb'])
             return target
 
-        def preview(source, target, *, viewer):
-            assert threading.get_ident() == main_thread and viewer is True
-            target.write_bytes(fixtures['landscape' if core.ENC['orient'] in (90, 270) else 'portrait'])
+        def preview(source, target, *, viewer, enc):
+            assert threading.get_ident() != main_thread and viewer is True
+            target.write_bytes(fixtures['landscape' if enc['orient'] in (90, 270) else 'portrait'])
 
         def send(plan, detach_ok, sha, progress, cancel, kind):
             assert threading.get_ident() != main_thread
@@ -91,6 +91,7 @@ def main():
                 patch.object(core, 'load_media', return_value=b'prepared'),
                 patch.object(core, 'probe_mp4', return_value=(4.5, 270, '60')),
                 patch.object(gui.thumbs, 'ensure_thumb', side_effect=thumbnail),
+                patch.object(gui.thumbs, 'media_size', return_value=(400, 200)),
                 patch.object(gui.subprocess, 'run', side_effect=forbidden),
                 patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes),
                 patch.object(QMessageBox, 'information'), patch.object(QMessageBox, 'warning'),
@@ -133,17 +134,17 @@ def main():
                 assert library.grid.count() == 0 and library.grid.isHidden() and not library.note.isHidden()  # 5
                 for position, fixture in ((90, 'landscape'), (0, 'portrait')):
                     lcd.position_buttons[position].click()
-                    lcd.send(); wait_for(lambda: lcd.worker is None)
+                    lcd.send(); wait_for(lambda: lcd.worker is None and lcd.pending_upload is None)
                     assert gui.last_sent_path().read_bytes() == fixtures[fixture]
                     shown = window.dashboard.last_sent
                     assert not shown.isHidden() and shown.width() * (3 if position == 90 else 4) == shown.height() * (4 if position == 90 else 3)
                     assert window.dashboard.last_file.text() == 'B.MP4' and 'Отправлено' in window.dashboard.last_upload.text()  # 6
                 original = gui.last_sent_path().read_bytes()
                 fail_send = True
-                lcd.position_buttons[90].click(); lcd.send(); wait_for(lambda: lcd.worker is None)
+                lcd.position_buttons[90].click(); lcd.send(); wait_for(lambda: lcd.worker is None and lcd.pending_upload is None)
                 assert gui.last_sent_path().read_bytes() == original
                 fail_send = False
-                lcd.mode_buttons['clock'].click(); lcd.btn_clock.click(); wait_for(lambda: lcd.worker is None)
+                lcd.mode_buttons['clock'].click(); lcd.btn_clock.click(); wait_for(lambda: lcd.worker is None and lcd.pending_upload is None)
                 assert gui.last_sent_path().read_bytes() == original  # 7
                 release.clear()
                 library.open_folder(str(folder))
@@ -160,7 +161,7 @@ def main():
                 imports = [alias.name for node in ast.parse((root / 's360_gui.py').read_text()).body if isinstance(node, ast.Import) for alias in node.names]
                 local = [name for name in imports if (root / (name + '.py')).exists()]
                 installer = (root / 'install.sh').read_text()
-                assert set(local) == {'s360_lcd', 'theme', 'monitor', 'thumbs'}
+                assert set(local) == {'s360_lcd', 'theme', 'monitor', 'thumbs', 'pan'}
                 for name in local:
                     assert f'install -Dm644 "$HERE/{name}.py" "$APP/{name}.py"' in installer
                 assert not errors and not core.STATE.exists()  # 10

@@ -31,13 +31,14 @@ import s360_lcd as core
 import theme
 import monitor
 import thumbs
+import pan
 
 UNIT = "s360-feed.service"
 COOLING_TITLES = {"silent": "Тихий", "balance": "Сбалансированный", "game": "Игровой", "custom": "Свой профиль"}
 OK, BAD, WARN = (theme.COLORS[key] for key in ("good", "error", "warning"))
 
 STYLE = theme.build_qss()
-UI_DEFAULT_SETTINGS = dict(core.DEFAULT_SETTINGS, fps="60", max_seconds=15, background="black", theme="dark", clock_style=1, gif_dir="")
+UI_DEFAULT_SETTINGS = dict(core.DEFAULT_SETTINGS, fps="60", max_seconds=15, background="black", theme="dark", clock_style=1, gif_dir="", last_file_path="")
 
 
 def badge(text, color):
@@ -82,6 +83,8 @@ def load_ui_settings():
     settings["clock_style"] = style if type(style) is int and 1 <= style <= 5 else 1
     folder = saved.get("gif_dir", "") if isinstance(saved, dict) else ""
     settings["gif_dir"] = folder if isinstance(folder, str) else ""
+    path = saved.get("last_file_path", "") if isinstance(saved, dict) else ""
+    settings["last_file_path"] = path if isinstance(path, str) else ""
     return settings
 
 
@@ -89,7 +92,8 @@ def save_ui_settings(settings):
     # Поля интерфейса дописываются после сохранения известных ядру настроек.
     core.save_settings(settings)
     saved = json.loads(core.SETTINGS.read_text())
-    saved.update(theme=settings.get("theme", "dark"), clock_style=settings.get("clock_style", 1), gif_dir=settings.get("gif_dir", ""))
+    saved.update(theme=settings.get("theme", "dark"), clock_style=settings.get("clock_style", 1), gif_dir=settings.get("gif_dir", ""),
+                 last_file_path=settings.get("last_file_path", ""))
     core._atomic_json(core.SETTINGS, saved)
 
 
@@ -206,6 +210,74 @@ class ThumbWorker(QThread):
             except Exception:
                 thumbnail = None
             self.ready.emit(self.generation, str(path), str(thumbnail) if thumbnail else "")
+
+
+class PreviewWorker(QThread):
+    def __init__(self, request, target, parent):
+        super().__init__(parent)
+        self.request, self.target = request, target
+        self.data, self.error = None, None
+
+    def run(self):
+        source, enc = self.request
+        try:
+            core.preview_png(Path(source), self.target, viewer=True, enc=enc)
+            self.data = self.target.read_bytes()
+        except Exception as error:
+            self.error = str(error)
+
+
+class PanPreview(QLabel):
+    moved = Signal(float, float)
+    released = Signal()
+    centered = Signal()
+
+    def __init__(self):
+        super().__init__("Выбери файл")
+        self.pannable = False
+        self.anchor = None
+
+    def set_pannable(self, enabled):
+        self.pannable = enabled
+        if not enabled:
+            self.anchor = None
+        self.setCursor(Qt.CursorShape.ClosedHandCursor if self.anchor is not None else
+                       Qt.CursorShape.OpenHandCursor if enabled else Qt.CursorShape.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.pannable:
+            self.anchor = event.position()
+            self.set_pannable(True)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.anchor is not None:
+            delta = event.position() - self.anchor
+            self.anchor = event.position()
+            self.moved.emit(delta.x(), delta.y())
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.anchor is not None:
+            self.anchor = None
+            self.set_pannable(self.pannable)
+            self.released.emit()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.anchor = None
+            self.set_pannable(self.pannable)
+            self.centered.emit()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
 
 
 class MediaLibrary(QWidget):
@@ -355,6 +427,9 @@ class DashboardPage(QWidget):
     def __init__(self, settings):
         super().__init__()
         self.s = settings
+        self.last_thumb_worker = None
+        self.last_thumb_source = None
+        self.last_thumb = QPixmap()
         lay = QGridLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(theme.SPACING[1])
@@ -468,6 +543,19 @@ class DashboardPage(QWidget):
         # Чтение имеет таймаут; завершаем потоки до уничтожения окна.
         self.cooler_worker.wait()
         self.gpu_worker.wait()
+        if self.last_thumb_worker is not None:
+            self.last_thumb_worker.wait()
+
+    def last_thumb_ready(self, generation, source, target):
+        if source == self.s.get("last_file_path") and not last_sent_path().exists():
+            self.last_thumb = QPixmap(target) if target else QPixmap()
+
+    def last_thumb_finished(self):
+        self.last_thumb_worker.wait()
+        self.last_thumb_worker.deleteLater()
+        self.last_thumb_worker = None
+        if not self._monitor_stopped:
+            self.refresh()
 
     def refresh(self):
         yes = lambda ok: badge("Подключён", OK) if ok else badge("Не найден", BAD)
@@ -485,6 +573,18 @@ class DashboardPage(QWidget):
             image.loadFromData(last_sent_path().read_bytes())
         except OSError:
             pass
+        source = self.s.get("last_file_path", "")
+        if image.isNull() and source and Path(source).is_file():
+            if self.last_thumb_source != source and self.last_thumb_worker is None:
+                self.last_thumb_source = source
+                self.last_thumb = QPixmap()
+                cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "s360-control" / "thumbs"
+                self.last_thumb_worker = ThumbWorker(0, [Path(source)], cache, self)
+                self.last_thumb_worker.ready.connect(self.last_thumb_ready)
+                self.last_thumb_worker.finished.connect(self.last_thumb_finished)
+                self.last_thumb_worker.start()
+            if self.last_thumb_source == source:
+                image = self.last_thumb
         self.last_sent.setVisible(not image.isNull())
         if not image.isNull():
             image = image.scaled(QSize(160, 160), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -537,6 +637,14 @@ class LcdPage(QWidget):
         self.worker = None
         self.pending_preview = None
         self.preview_source = None
+        self.preview_worker = None
+        self.preview_pending = None
+        self.preview_request = None
+        self.preview_bytes = None
+        self.pending_upload = None
+        self.pending_file_path = None
+        self.source_size = (0, 0)
+        self.preview_stopped = False
         self.brightness_baseline = int(self.s["brightness"]) if self.s["lcd_enabled"] else 0
         self.transfer_states = {}
         self.tmp = tempfile.TemporaryDirectory()
@@ -598,7 +706,7 @@ class LcdPage(QWidget):
         preview_layout.addStretch()
         self.preview_stack = QStackedWidget()
         self.preview_stack.setFixedSize(168, 224)
-        self.lbl_prev = QLabel("Выбери файл")
+        self.lbl_prev = PanPreview()
         self.lbl_prev.setObjectName("preview")
         self.lbl_prev.setFixedSize(168, 224)
         self.lbl_prev.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -609,6 +717,12 @@ class LcdPage(QWidget):
         self.preview_stack.addWidget(self.lbl_prev)
         self.preview_stack.addWidget(self.clock_preview)
         preview_layout.addWidget(self.preview_stack, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.pan_note = muted("Тяни, чтобы сдвинуть")
+        self.pan_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_layout.addWidget(self.pan_note)
+        self.lbl_prev.moved.connect(self.drag_preview)
+        self.lbl_prev.released.connect(self.update_preview)
+        self.lbl_prev.centered.connect(self.center_preview)
         self.clock_preview_note = muted("Время берётся из системы")
         self.clock_preview_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_layout.addWidget(self.clock_preview_note)
@@ -732,7 +846,7 @@ class LcdPage(QWidget):
         self.btn_pick.clicked.connect(self.pick)
         self.btn_send.clicked.connect(self.send)
         self.btn_cancel.clicked.connect(self.cancel)
-        self.cmb_scale.currentIndexChanged.connect(self.changed)
+        self.cmb_scale.currentIndexChanged.connect(self.scale_changed)
         self.spn_trim.valueChanged.connect(self.changed)
         self.changed()
         self.show_mode()
@@ -765,6 +879,7 @@ class LcdPage(QWidget):
         self.preview_box.setVisible(True)
         self.preview_stack.setCurrentIndex(1 if clock else 0)
         self.clock_preview_note.setVisible(clock)
+        self.update_pan_cursor()
         self.update_orientation()
         self.footer_changed.emit()
         self.btn_send.setVisible(not clock)
@@ -871,26 +986,64 @@ class LcdPage(QWidget):
         self.resize_preview()
 
     # --- настройки
+    def encoding_settings(self):
+        enc = dict(core.ENC)
+        enc.update(fps="60", max_seconds=15,
+                   scale=self.cmb_scale.currentData(), focus_x=self.s["focus_x"],
+                   focus_y=self.s["focus_y"], rotate=0, orient=int(self.s["screen_pos"]),
+                   background=self.background_value(), edge_trim=self.spn_trim.value())
+        return enc
+
     def apply_enc(self):
-        core.ENC.update(fps="60", max_seconds=15,
-                        scale=self.cmb_scale.currentData(), focus_x=0.5,
-                        focus_y=0.5, rotate=0, orient=int(self.s["screen_pos"]),
-                        background=self.background_value(),
-                        edge_trim=self.spn_trim.value())
+        core.ENC.update(self.encoding_settings())
+
+    def viewer_size(self):
+        return (core.H, core.W) if int(self.s["screen_pos"]) in (90, 270) else (core.W, core.H)
+
+    def update_pan_cursor(self):
+        possible = (self.src is not None and self.worker is None and self.pending_upload is None
+                    and self.s["lcd_mode"] == "media"
+                    and any(pan.can_pan(self.cmb_scale.currentData(), *self.source_size, *self.viewer_size())))
+        self.lbl_prev.set_pannable(possible)
+        self.pan_note.setVisible(possible)
+
+    def drag_preview(self, dx, dy):
+        if not self.lbl_prev.pannable:
+            return
+        vw, vh = self.viewer_size()
+        fx, fy = pan.drag(self.cmb_scale.currentData(), self.s["focus_x"], self.s["focus_y"],
+                          dx * vw / self.lbl_prev.width(), dy * vh / self.lbl_prev.height(),
+                          *self.source_size, vw, vh)
+        self.s.update(focus_x=fx, focus_y=fy)
+        save_ui_settings(self.s)
+        self.timer.stop()
+        self.update_preview()
+
+    def center_preview(self):
+        if self.worker is not None or self.pending_upload is not None or not self.src:
+            return
+        self.s.update(focus_x=0.5, focus_y=0.5)
+        self.changed()
+        self.timer.stop()
+        self.update_preview()
+
+    def scale_changed(self, *_):
+        self.s.update(focus_x=0.5, focus_y=0.5)
+        self.changed()
 
     def changed(self, *_):
         self.s["rotate"] = 0
         self.update_orientation()
         try:
             self.s.update(fps="60", max_seconds=15,
-                          scale=self.cmb_scale.currentData(), focus_x=0.5,
-                          focus_y=0.5, with_select=True,
+                          scale=self.cmb_scale.currentData(), with_select=True,
                           rotate=0,
                           background=self.background_value(),
                           edge_trim=self.spn_trim.value())
             save_ui_settings(self.s)
         except (core.S360Error, OSError):
             pass
+        self.update_pan_cursor()
         self.timer.start(300)
         self.footer_changed.emit()
 
@@ -901,9 +1054,13 @@ class LcdPage(QWidget):
             self.select_file(path)
 
     def select_file(self, path):
-        if self.worker is not None:
+        if self.worker is not None or self.pending_upload is not None:
             return
-        self.src = str(path)
+        self.src = str(Path(path).resolve())
+        self.source_size = thumbs.media_size(self.src) or (0, 0)
+        self.s.update(focus_x=0.5, focus_y=0.5)
+        self.lbl_prev.clear()
+        self.preview_bytes = None
         self.library.select_source(self.src)
         self.transfer_states.pop("media", None)
         self.lbl_file.setText(Path(path).name)
@@ -931,21 +1088,50 @@ class LcdPage(QWidget):
         self.changed()
 
     def update_preview(self):
-        if not self.src or self.worker is not None:
+        if not self.src or self.worker is not None or self.preview_stopped:
             return
-        self.preview_source = None
-        try:
-            self.apply_enc()
-            png = Path(self.tmp.name) / "preview.png"
-            core.preview_png(Path(self.src), png, viewer=True)
-            # Загрузка байтов исключает возврат старого кадра из файлового кеша Qt.
-            self.preview_pixmap = QPixmap()
-            self.preview_pixmap.loadFromData(png.read_bytes())
-            self.preview_source = self.src
-            self.scale_preview()
-        except (core.S360Error, OSError) as e:
-            self.lbl_prev.setText("нет предпросмотра")
-            self.log.appendPlainText(f"предпросмотр: {e}")
+        self.preview_pending = (self.src, self.encoding_settings())
+        if self.preview_worker is None:
+            self.start_preview()
+
+    def start_preview(self):
+        request, self.preview_pending = self.preview_pending, None
+        self.preview_worker = PreviewWorker(request, Path(self.tmp.name) / "preview.png", self)
+        self.preview_worker.finished.connect(self.preview_finished)
+        self.preview_worker.start()
+
+    def preview_finished(self):
+        worker = self.preview_worker
+        worker.wait()
+        self.preview_worker = None
+        current = (self.src, self.encoding_settings())
+        if not self.preview_stopped and worker.request == current:
+            self.preview_source = self.src if worker.data else None
+            self.preview_request = worker.request
+            self.preview_bytes = worker.data
+            if worker.data:
+                self.preview_pixmap = QPixmap()
+                self.preview_pixmap.loadFromData(worker.data)
+                self.scale_preview()
+            else:
+                self.lbl_prev.setText("нет предпросмотра")
+                self.log.appendPlainText(f"предпросмотр: {worker.error}")
+            if self.pending_upload is not None:
+                self.pending_preview = worker.data
+                plan, sha, kind = self.pending_upload
+                self.pending_upload = None
+                self.launch_send(plan, sha, kind)
+        worker.deleteLater()
+        if self.preview_pending is not None and not self.preview_stopped and self.worker is None:
+            self.start_preview()
+
+    def stop_preview(self):
+        self.preview_stopped = True
+        self.timer.stop()
+        self.preview_pending = None
+        self.pending_upload = None
+        if self.preview_worker is not None:
+            self.preview_worker.wait()
 
     # --- отправка
     def confirm_previous(self):
@@ -960,15 +1146,9 @@ class LcdPage(QWidget):
 
     def start_worker(self, plan, sha, kind):
         self.pending_preview = None
-        if kind == "upload":
-            self.timer.stop()
-            self.update_preview()
-            if self.preview_source == self.src:
-                try:
-                    self.pending_preview = (Path(self.tmp.name) / "preview.png").read_bytes()
-                except OSError:
-                    pass
+        self.timer.stop()
         self.pending_file = Path(self.src).name if kind == "upload" else None
+        self.pending_file_path = str(Path(self.src).resolve()) if kind == "upload" else None
         self.btn_send.setEnabled(False)
         self.btn_clock.setEnabled(False)
         self.panel.setEnabled(False)
@@ -984,18 +1164,27 @@ class LcdPage(QWidget):
         self.btn_cancel.show()
         self.transfer_states[self.s["lcd_mode"]] = ("Отправка", "Хост отправляет; приём LCD не подтверждён")
         self.footer_changed.emit()
+        if kind == "upload":
+            self.pending_upload = (plan, sha, kind)
+            self.update_pan_cursor()
+            self.update_preview()
+        else:
+            self.launch_send(plan, sha, kind)
+
+    def launch_send(self, plan, sha, kind):
         self.worker = SendWorker(plan, True, sha, kind, clock_style=self.s["clock_style"])
         self.worker.clock_time.connect(self.clock_time_ready)
         self.worker.progress.connect(self.on_progress)
         self.worker.done_ok.connect(self.on_done)
         self.worker.failed.connect(self.on_failed)
         self.worker.start()
+        self.update_pan_cursor()
 
     def send(self):
         if not self.src:
             QMessageBox.information(self, "S360", "Сначала выберите файл.")
             return
-        if self.worker is not None:
+        if self.worker is not None or self.pending_upload is not None:
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -1028,7 +1217,12 @@ class LcdPage(QWidget):
         self.start_worker(plan, sha, "upload")
 
     def cancel(self):
-        if self.worker is not None:
+        if self.pending_upload is not None:
+            self.pending_upload = None
+            self.pending_file = self.pending_file_path = None
+            self.transfer_states["media"] = ("Готово", "Отправка отменена до передачи")
+            self.finish_ui()
+        elif self.worker is not None:
             self.worker.cancel()
             self.log.appendPlainText("отмена запрошена (между пакетами)…")
 
@@ -1037,7 +1231,8 @@ class LcdPage(QWidget):
         self.prog.setValue(i)
 
     def finish_ui(self):
-        self.worker.wait()
+        if self.worker is not None:
+            self.worker.wait()
         self.worker = None
         self.btn_send.setEnabled(True)
         self.btn_clock.setEnabled(True)
@@ -1079,6 +1274,7 @@ class LcdPage(QWidget):
                     target.unlink(missing_ok=True)
             except OSError as e:
                 QMessageBox.warning(self, "Миниатюра не сохранена", str(e))
+            self.s["last_file_path"] = self.pending_file_path
             self.s["last_file"] = self.pending_file
             self.s["last_upload_time"] = datetime.datetime.now().timestamp()
             self.pending_file = None
@@ -1852,6 +2048,7 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.dashboard.stop_polling()
         lcd.library.stop()
+        lcd.stop_preview()
         event.accept()
 
 
